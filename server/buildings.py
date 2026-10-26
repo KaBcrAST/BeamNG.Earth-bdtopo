@@ -361,6 +361,15 @@ class Style:
 _US_ROOFS = ((ROOF_SLATE, (0, 1, 2, 3)), (ROOF_SHINGLE, (0, 1, 2, 3)))
 _CLAY = (ROOF_SLATE, (4, 5, 6))
 _DARK = (ROOF_SLATE, (7, 8, 9))
+# A pitched roof whose skin the data names, in place of the region's guess (ROOF_TINTS: 4-6 are the clay
+# terracottas, 7-9 the slate and anthracite greys): Overture roof_material / OSM roof:material, and over France
+# the IGN's materiaux_de_la_toiture (bdtopo.py). Only the skins these palettes can actually show are listed.
+ROOF_MAPPED = {
+    "roof_tiles": _CLAY, "tile": _CLAY, "tiles": _CLAY, "clay": _CLAY, "terracotta": _CLAY,
+    "slate": (ROOF_SLATE, (7, 8)), "stone": (ROOF_SLATE, (7, 8)),
+    "metal": (ROOF_METAL, (0, 1)), "zinc": (ROOF_METAL, (0, 1)), "copper": (ROOF_METAL, (0, 1)),
+    "tin": (ROOF_METAL, (0, 1)), "corrugated_iron": (ROOF_METAL, (0, 1)),
+}
 STYLES = {
     "us_east": Style("us_east", 0.75, ((SIDING, 0.75),), 0.55, 0.0, 0.4, _US_ROOFS, barn_red=0.5),
     "us_south": Style("us_south", 0.35, ((SIDING, 0.75),), 0.55, 0.0, 0.4, _US_ROOFS, barn_red=0.5),
@@ -715,7 +724,11 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
         roof_mat = ROOF_FLAT if roof == "flat" else ROOF_METAL
         roof_mat = f"{roof_mat}|{int(_hash01(seed, 'roof') * len(ROOF_TINTS[roof_mat]))}"
     else:       # the region's pitched roofs (the US: slate or shingle by the seed, their first four tints)
-        mat, tints = style.roofs[min(int(seed * len(style.roofs)), len(style.roofs) - 1)]
+        # a mapped roof skin first (Overture roof_material, OSM roof:material, and over France the IGN's
+        # materiaux_de_la_toiture: bdtopo.py): slate, clay tile and Paris's zinc read very differently, and
+        # the region's own habit is only a guess where the data says which one it is
+        mapped = ROOF_MAPPED.get(str(attrs.get("roof_material") or "").lower())
+        mat, tints = mapped if mapped else style.roofs[min(int(seed * len(style.roofs)), len(style.roofs) - 1)]
         roof_mat = f"{mat}|{tints[int(_hash01(seed, 'roof') * len(tints))]}"
     if (barn or shed) and not stone_hut:    # plain walls tinted: barns the region's barn red or wood, sheds the siding colours
         tints = WALL_TINTS[SIDING]
