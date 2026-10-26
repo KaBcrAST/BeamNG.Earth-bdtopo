@@ -212,6 +212,14 @@ POLICIES = {
     # MB per new area); optional: without it roads keep their width guesses
     "data.openstreetmap.us": HostPolicy(rate=4.0, burst=8.0, max_conc=2, daily_budget=5000, allow_prefetch=True,
                                         offline_ok=True, miss_ttl=None, binary=True, timeout=30.0, optional=True),
+    # The IGN Geoplateforme serves two things here, so it gets its own row rather than the shared tile-cache one
+    # _regional_policies() would give it: the BD ORTHO tiles (imagery_regional "france") and the BD TOPO building
+    # heights (bdtopo.py). A WFS page is 0.5-7 MB against a tile's ~20 kB, so the timeout is the WMS-type 30 s, and
+    # the daily budget is the tile cache's (the heights add one or two requests a cell on top). binary stays on: it
+    # only rejects an HTML error page, and the WFS answers application/json (measured 2026-10-26).
+    "data.geopf.fr": HostPolicy(rate=6.0, burst=20.0, max_conc=4, daily_budget=20000, allow_prefetch=True,
+                                miss_ttl=30 * DAY, timeout=30.0, max_attempts=2, base_delay=2.0,
+                                breaker_threshold=6, breaker_window=120.0, optional=True, **TILE_HOST),
     # never at runtime (OSM Overpass, OSMF vector tiles, Protomaps builds): §3.3
     "overpass-api.de": HostPolicy(denied=True, daily_hard=0),
     "vector.openstreetmap.org": HostPolicy(denied=True, daily_hard=0),

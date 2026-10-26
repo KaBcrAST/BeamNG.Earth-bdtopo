@@ -60,6 +60,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+import bdtopo
 import geodesy
 import mapcells
 import mapgeom
@@ -88,7 +89,8 @@ VERSION = 2                     # pipeline version: bump when what a cell's laye
 # roads 4: OpenStreetMap's raceways appended (osmtags.raceways, GitHub #143)
 # roads 5: a segment from an OSM relation (no way id) takes the tags of the same-named way around it (osmtags.join)
 # roads 6: rail segments' rail_flags (is_bridge / is_tunnel) in the "flags" rule (railways.py, mpsteppe's PR #287)
-LAYER_VERSIONS = {"roads": 6}
+# buildings 1: IGN BD TOPO heights joined in over France (bdtopo.py); the cached cells guessed them
+LAYER_VERSIONS = {"roads": 6, "buildings": 1}
                                 # (2: clipped polygon pieces `own`ed by their cell, exact cell edges,
                                 # the exact no-area test of clipped rings)
 VECTOR_LAYERS = ("roads", "connectors", "buildings", "water", "land_use", "infrastructure", "building_parts", "places")
@@ -121,6 +123,7 @@ CREDIT_LINES = {
     "esa-worldcover": "© ESA WorldCover project 2021 / Contains modified Copernicus Sentinel data (2021) "
                       "processed by ESA WorldCover consortium",
     "meta-wri-chm": "Canopy height: Meta & WRI",
+    "ign-bdtopo": bdtopo.CREDIT_LINE,
 }
 THEME_OF = {name: spec["theme"] for name, spec in overture.LAYERS.items()}
 
@@ -239,7 +242,7 @@ class MapData:
         self._locks = {}
         self._lock = threading.Lock()
         self.pool = ThreadPoolExecutor(LAYER_THREADS, thread_name_prefix="mapdata-layer")
-        self._mem = OrderedDict()           # (cell, layer) -> (decoded layer, provenance, bytes): cell()'s LRU
+        self._mem = OrderedDict()           # (cell, layer) -> (decoded layer, provenance, bytes, second provenance): cell()'s LRU
         self._mem_bytes = 0
         self._mem_lock = threading.Lock()
         self._warm_ex = None
@@ -340,6 +343,8 @@ class MapData:
             feats, sources = self.overture.query(layer, key, kind)
             if osm is not None:
                 feats = self._osm(feats, osm.result())
+            # France's buildings have almost no height in Overture / OSM: the IGN's own survey fills them in
+            prov2 = self._bdtopo(key, layer, feats, kind)
             ox, oy = mapcells.owner(feats.attrs.get("cx", np.zeros(0)), feats.attrs.get("cy", np.zeros(0)), key.z)
             feats.own = (ox == key.x) & (oy == key.y)
             if feats.clipped is not None:
@@ -348,6 +353,8 @@ class MapData:
                 feats.own |= feats.clipped
             arrays = _layer_arrays(feats)
             prov = overture.sources_provenance(THEME_OF[layer], self.release, sources) if len(feats) else None
+            if prov2 is not None:
+                arrays["provenance2"] = np.array(json.dumps(prov2, sort_keys=True))
         elif layer == "landcover":
             r = self.rasters.worldcover(key, kind)
             arrays = _layer_arrays(r)
@@ -387,6 +394,38 @@ class MapData:
         except Exception as e:          # optional: the roads go on with their guesses
             log.warning("mapdata: OSM road tags of %s: %s: %s", key, type(e).__name__, e)
             return {}, []
+
+    def _bdtopo(self, key, layer, feats, kind):
+        """Join the IGN BD TOPO heights into the cell's buildings over France (bdtopo.py); the provenance record
+        when any were filled in, else None.
+
+        Optional, like the OSM road tags: where the IGN does not answer the buildings keep buildings.plan()'s
+        guesses, the cell is not kept (revisit.fault) and the log says so once per cell."""
+        if layer != "buildings" or self.fetcher is None or not len(feats) or not bdtopo.enabled():
+            return None
+        bounds = key.bounds()
+        if not bdtopo.covers(bounds):
+            return None
+        try:
+            recs = bdtopo.fetch(self.fetcher, bounds, kind)
+        except DEFERRED:
+            # a prefetch the host had no room for: not built now rather than cached for good without the
+            # heights (as _osm_cell does for the road tags)
+            if kind not in ("demand", "urgent"):
+                raise
+            log.warning("mapdata: IGN BD TOPO heights of %s: the host is busy (%s); the buildings keep their "
+                        "guessed heights", key, kind)
+            revisit.fault()
+            return None
+        except Exception as e:
+            log.warning("mapdata: IGN BD TOPO heights of %s: %s: %s; the buildings keep their guessed heights",
+                        key, type(e).__name__, e)
+            revisit.fault()
+            return None
+        filled, dressed = bdtopo.join(feats, recs)
+        log.info("mapdata: IGN BD TOPO heights for %d of %d buildings in %s (%d facade materials)",
+                 filled, len(feats), key, dressed)
+        return dict(bdtopo.PROVENANCE, buildings=filled, facades=dressed) if filled or dressed else None
 
     @staticmethod
     def _osm(feats, got):
@@ -466,7 +505,7 @@ class MapData:
         full = dict(arrays)
         try:
             if layer in VECTOR_LAYERS and "lonlat" in full and "en.local" not in full:
-                f = mapgeom.Features.from_arrays(layer, {k: v for k, v in full.items() if k != "provenance"}, "")
+                f = mapgeom.Features.from_arrays(layer, {k: v for k, v in full.items() if not k.startswith("provenance")}, "")
                 lat_c, lon_c = key.center()
                 full["en.local"] = f.localize(geodesy.EnuFrame(lat_c, lon_c, 0.0)).en
             stamp = self._stamp(path)
@@ -547,12 +586,15 @@ class MapData:
             raise err
         for layer in layers:                # assembled in the caller's order, whatever finished first
             if layer in mem:                # decoded before: shared (cell layers are never changed after loading)
-                cd.layers[layer], prov, _ = mem[layer]
+                cd.layers[layer], prov, _, extra = mem[layer]
                 dt, hit = 0.0, True
             else:
                 arrays, hit, dt = results[layer]
                 arrays = dict(arrays)
                 prov = json.loads(str(arrays.pop("provenance")))
+                # a layer with a second source (buildings: Overture's footprints, the IGN's heights)
+                raw2 = arrays.pop("provenance2", None)
+                extra = json.loads(str(raw2)) if raw2 is not None else None
                 en = arrays.pop("en.local", None)     # (the mirror's: this frame's, Features.localize)
                 if layer in VECTOR_LAYERS:
                     f = mapgeom.Features.from_arrays(layer, arrays, "")
@@ -568,7 +610,9 @@ class MapData:
                     cd.layers[layer] = None
                 else:
                     cd.layers[layer] = _raster_from(arrays)
-                self._remember((str(key), layer), (cd.layers[layer], prov, _nbytes(arrays)))
+                self._remember((str(key), layer), (cd.layers[layer], prov, _nbytes(arrays), extra))
+            if extra:
+                provs.setdefault(extra["id"], extra)
             if prov:
                 pid = prov["id"]
                 if pid in provs:            # roads + connectors: one transportation record
@@ -593,7 +637,7 @@ class MapData:
             self._mem[k] = entry
             self._mem_bytes += entry[2]
             while self._mem_bytes > MEM_MB * 1e6 and len(self._mem) > 1:
-                _, (_, _, n) = self._mem.popitem(last=False)
+                _, (_, _, n, _) = self._mem.popitem(last=False)
                 self._mem_bytes -= n
 
     def warm(self, needs, kind="demand"):
