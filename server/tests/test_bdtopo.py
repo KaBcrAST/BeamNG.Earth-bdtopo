@@ -88,14 +88,16 @@ class ValuesTest(unittest.TestCase):
     """What one BD TOPO record gives, including the service's ways of saying "unknown"."""
 
     def test_height_from_altitudes(self):
-        h, roof, floors, _w, _r = bdtopo.values({"altitude_minimale_sol": 20.0, "altitude_minimale_toit": 38.0,
-                                         "altitude_maximale_toit": 42.0, "nombre_d_etages": 5, "hauteur": 19.0})
+        v = bdtopo.values({"altitude_minimale_sol": 20.0, "altitude_minimale_toit": 38.0,
+                           "altitude_maximale_toit": 42.0, "nombre_d_etages": 5, "hauteur": 19.0})
+        h, roof, floors = v.height, v.roof_height, v.num_floors
         self.assertAlmostEqual(h, 22.0)         # the roof's top above the lowest ground, not "hauteur"
         self.assertAlmostEqual(roof, 4.0)
         self.assertEqual(floors, 5.0)
 
     def test_hauteur_when_no_altitudes(self):
-        h, roof, floors, _w, _r = bdtopo.values({"hauteur": 12.5})
+        v = bdtopo.values({"hauteur": 12.5})
+        h, roof, floors = v.height, v.roof_height, v.num_floors
         self.assertAlmostEqual(h, 12.5)
         self.assertIsNone(roof)
         self.assertIsNone(floors)
@@ -107,12 +109,12 @@ class ValuesTest(unittest.TestCase):
 
     def test_altitude_zero_is_a_real_altitude(self):
         """0 means "unknown" for hauteur only: a building at sea level has altitude_minimale_sol 0."""
-        h, _roof, _f, _w, _r = bdtopo.values({"altitude_minimale_sol": 0.0, "altitude_maximale_toit": 9.0})
+        h = bdtopo.values({"altitude_minimale_sol": 0.0, "altitude_maximale_toit": 9.0}).height
         self.assertAlmostEqual(h, 9.0)
 
     def test_flat_roof_left_to_plan(self):
-        _h, roof, _f, _w, _r = bdtopo.values({"altitude_minimale_sol": 0.0, "altitude_minimale_toit": 11.8,
-                                      "altitude_maximale_toit": 12.0})
+        roof = bdtopo.values({"altitude_minimale_sol": 0.0, "altitude_minimale_toit": 11.8,
+                              "altitude_maximale_toit": 12.0}).roof_height
         self.assertIsNone(roof, "0.2 m is flat: buildings.plan() decides the shape")
 
     def test_nonsense_is_dropped(self):
@@ -301,8 +303,8 @@ class JoinTest(unittest.TestCase):
 
     def test_nothing_to_join(self):
         f = buildings([box(self.lon, self.lat, self.w, self.h)])
-        self.assertEqual(bdtopo.join(f, []), (0, 0))
-        self.assertEqual(bdtopo.join(buildings([]), self.records(hauteur=12.0)), (0, 0))
+        self.assertEqual(bdtopo.join(f, []), (0, 0, 0))
+        self.assertEqual(bdtopo.join(buildings([]), self.records(hauteur=12.0)), (0, 0, 0))
 
 
 class MaterialTest(unittest.TestCase):
@@ -354,7 +356,7 @@ class MaterialTest(unittest.TestCase):
                                materiaux_de_la_toiture="20")])
         recs = bdtopo.fetch(wfs, LILLE.bounds())
         f = buildings([box(lon, lat, w, h, shrink=0.94)])
-        filled, dressed = bdtopo.join(f, recs)
+        filled, dressed, _c = bdtopo.join(f, recs)
         self.assertEqual((filled, dressed), (1, 1))
         self.assertEqual(str(f.attrs["facade_material"][0]), "brick")
         self.assertEqual(str(f.attrs["roof_material"][0]), "slate")
@@ -362,7 +364,7 @@ class MaterialTest(unittest.TestCase):
         # Overture's own facade_material wins
         g = buildings([box(lon, lat, w, h, shrink=0.94)])
         g.attrs["facade_material"] = np.array(["glass"])
-        _filled, dressed2 = bdtopo.join(g, recs)
+        _filled, dressed2, _c2 = bdtopo.join(g, recs)
         self.assertEqual(dressed2, 0)
         self.assertEqual(str(g.attrs["facade_material"][0]), "glass")
 
@@ -372,7 +374,7 @@ class MaterialTest(unittest.TestCase):
         recs = bdtopo.fetch(FakeWfs([feature(lon, lat, w, h, hauteur=11.0, materiaux_des_murs="10")]),
                             LILLE.bounds())
         f = buildings([box(lon, lat, w, h, shrink=0.94)], heights=[8.0])
-        filled, dressed = bdtopo.join(f, recs)
+        filled, dressed, _c = bdtopo.join(f, recs)
         self.assertEqual((filled, dressed), (0, 1))
         self.assertAlmostEqual(float(f.attrs["height"][0]), 8.0, msg="its own height is untouched")
         self.assertEqual(str(f.attrs["facade_material"][0]), "stone")
@@ -384,6 +386,105 @@ class MaterialTest(unittest.TestCase):
         self.assertIn("brick", bld.MASONRY_MATERIALS)
         for word in bdtopo.WALL_CODES.values():
             self.assertEqual(word, word.lower(), "plan() lower-cases what it compares")
+
+
+class ClassTest(unittest.TestCase):
+    """nature and usage_1 / usage_2 turned into the class plan() keys its styling on. Overture leaves 85 % of a
+    French cell's buildings with no class at all, so this is where most of the look is decided."""
+
+    def test_every_documented_value_is_mapped(self):
+        """Both enumerations are closed (bdtopoexplorer.ign.fr/batiment): a value the IGN lists and this module
+        has never heard of would silently fall through."""
+        natures = ("Arc de triomphe", "Arene ou theatre antique", "Chapelle", "Chateau", "Eglise",
+                   "Fort, blockhaus, casemate", "Indifferenciee", "Industriel, agricole ou commercial",
+                   "Monument", "Moulin a vent", "Serre", "Silo", "Tour, donjon", "Tribune")
+        usages = ("Agricole", "Annexe", "Commercial et services", "Indifferencie", "Industriel", "Religieux",
+                  "Residentiel", "Sportif")
+        known = dict(bdtopo.NATURE_CLASS, **bdtopo.NATURE_VAGUE)
+        for v in natures:
+            self.assertIn(bdtopo._fold(v), known, v)
+        for v in usages:
+            self.assertIn(bdtopo._fold(v), bdtopo.USAGE_CLASS, v)
+        self.assertEqual(len(known), len(natures))
+        self.assertEqual(len(bdtopo.USAGE_CLASS), len(usages))
+
+    def test_accents_do_not_matter(self):
+        """The service sends "Residentiel" and "Religieux" with accents; the keys are folded."""
+        self.assertEqual(bdtopo.building_class({"usage_1": "Résidentiel", "nombre_de_logements": 1}), "house")
+        self.assertEqual(bdtopo.building_class({"nature": "Église"}), "church")
+        self.assertEqual(bdtopo.building_class({"usage_1": "Religieux"}), "church")
+
+    def test_dwellings_split_houses_from_flats(self):
+        self.assertEqual(bdtopo.building_class({"usage_1": "Residentiel", "nombre_de_logements": 1}), "house")
+        self.assertEqual(bdtopo.building_class({"usage_1": "Residentiel", "nombre_de_logements": 12}), "apartments")
+        self.assertEqual(bdtopo.building_class({"usage_1": "Residentiel"}), "residential",
+                         "half the records have no dwelling count: residential is still better than nothing")
+        self.assertEqual(bdtopo.building_class({"usage_1": "Residentiel", "nombre_de_logements": 0}), "residential",
+                         "0 dwellings is the service's way of saying it does not know")
+
+    def test_nature_wins_over_usage(self):
+        self.assertEqual(bdtopo.building_class({"nature": "Eglise", "usage_1": "Residentiel",
+                                                "nombre_de_logements": 1}), "church")
+        self.assertEqual(bdtopo.building_class({"nature": "Industriel, agricole ou commercial",
+                                                "usage_1": "Indifferencie"}), "industrial",
+                         "with no usage of its own, the vague nature is all there is")
+
+    def test_the_vague_nature_never_beats_a_real_use(self):
+        """"Industriel, agricole ou commercial" names three different things: of the 139 buildings carrying it in
+        a Flanders sample, 25 were shops and 41 annexes, and metal-walled sheds would have been wrong for them."""
+        vague = "Industriel, agricole ou commercial"
+        self.assertEqual(bdtopo.building_class({"nature": vague, "usage_1": "Commercial et services"}), "retail")
+        self.assertEqual(bdtopo.building_class({"nature": vague, "usage_1": "Annexe"}), "shed")
+        self.assertEqual(bdtopo.building_class({"nature": vague, "usage_1": "Agricole"}), "barn")
+        self.assertEqual(bdtopo.building_class({"nature": vague, "usage_1": "Residentiel",
+                                                "nombre_de_logements": 1}), "house")
+        self.assertEqual(bdtopo.building_class({"nature": vague, "usage_2": "Commercial et services"}), "retail")
+        self.assertEqual(bdtopo.building_class({"nature": vague}), "industrial")
+
+    def test_light_constructions(self):
+        """construction_legere is a shelter, not a building; a light dwelling is a mobile home."""
+        self.assertEqual(bdtopo.building_class({"construction_legere": True}), "shed")
+        self.assertEqual(bdtopo.building_class({"construction_legere": True, "usage_1": "Commercial et services"}),
+                         "shed")
+        self.assertEqual(bdtopo.building_class({"construction_legere": True, "usage_1": "Residentiel",
+                                                "nombre_de_logements": 1}), "static_caravan")
+        self.assertIsNone(bdtopo.building_class({"construction_legere": False}))
+
+    def test_second_use_when_the_first_says_nothing(self):
+        self.assertEqual(bdtopo.building_class({"usage_1": "Indifferencie", "usage_2": "Commercial et services"}),
+                         "retail")
+        self.assertEqual(bdtopo.building_class({"usage_2": "Annexe"}), "shed")
+
+    def test_no_opinion(self):
+        for props in ({}, {"nature": "Indifferenciee", "usage_1": "Indifferencie"},
+                      {"nature": "Chateau"}, {"nature": "Silo"}, {"usage_1": "Sportif"},
+                      {"nature": "Monument", "usage_1": "Indifferencie"}):
+            self.assertIsNone(bdtopo.building_class(props), props)
+
+    def test_words_buildings_py_groups(self):
+        """Every class this module can produce must be one buildings.py actually recognises."""
+        import buildings as bld
+        known = (bld.HOUSE_CLASSES | bld.ROW_CLASSES | set(bld.SHOP_CLASSES) | set(bld.INDUSTRIAL_CLASSES)
+                 | set(bld.CHURCH_CLASSES) | set(bld.BARN_CLASSES) | set(bld.SHED_CLASSES) | {"apartments"})
+        produced = {v for v in list(bdtopo.NATURE_CLASS.values()) + list(bdtopo.USAGE_CLASS.values()) if v}
+        produced |= {"house", "apartments", "residential", "static_caravan"}
+        self.assertEqual(produced - known, set(), "a class plan() would not recognise")
+
+    def test_class_is_joined_only_where_overture_has_none(self):
+        lon, lat, w, h = 2.7355, 50.7357, 2.4e-4, 1.6e-4
+        bailleul = mapcells.CellKey(14, 8316, 5504).bounds()
+        feat = feature(lon, lat, w, h, hauteur=7.0, usage_1="Residentiel", nombre_de_logements=1)
+        recs = bdtopo.fetch(FakeWfs([feat]), bailleul)
+        f = buildings([box(lon, lat, w, h, shrink=0.94)])
+        filled, _dressed, classed = bdtopo.join(f, recs)
+        self.assertEqual((filled, classed), (1, 1))
+        self.assertEqual(str(f.attrs["class"][0]), "house")
+
+        g = buildings([box(lon, lat, w, h, shrink=0.94)])
+        g.attrs["class"] = np.array(["retail"])
+        _f2, _d2, classed2 = bdtopo.join(g, recs)
+        self.assertEqual(classed2, 0)
+        self.assertEqual(str(g.attrs["class"][0]), "retail", "Overture's own class is the more precise")
 
 
 class ProvenanceTest(unittest.TestCase):

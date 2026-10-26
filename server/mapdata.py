@@ -90,7 +90,8 @@ VERSION = 2                     # pipeline version: bump when what a cell's laye
 # roads 5: a segment from an OSM relation (no way id) takes the tags of the same-named way around it (osmtags.join)
 # roads 6: rail segments' rail_flags (is_bridge / is_tunnel) in the "flags" rule (railways.py, mpsteppe's PR #287)
 # buildings 1: IGN BD TOPO heights joined in over France (bdtopo.py); the cached cells guessed them
-LAYER_VERSIONS = {"roads": 6, "buildings": 1}
+# buildings 2: the BD TOPO use and materials too (facade_material, roof_material, class)
+LAYER_VERSIONS = {"roads": 6, "buildings": 2}
                                 # (2: clipped polygon pieces `own`ed by their cell, exact cell edges,
                                 # the exact no-area test of clipped rings)
 VECTOR_LAYERS = ("roads", "connectors", "buildings", "water", "land_use", "infrastructure", "building_parts", "places")
@@ -422,10 +423,12 @@ class MapData:
                         key, type(e).__name__, e)
             revisit.fault()
             return None
-        filled, dressed = bdtopo.join(feats, recs)
-        log.info("mapdata: IGN BD TOPO heights for %d of %d buildings in %s (%d facade materials)",
-                 filled, len(feats), key, dressed)
-        return dict(bdtopo.PROVENANCE, buildings=filled, facades=dressed) if filled or dressed else None
+        filled, dressed, classed = bdtopo.join(feats, recs)
+        log.info("mapdata: IGN BD TOPO heights for %d of %d buildings in %s (%d facade materials, %d classes)",
+                 filled, len(feats), key, dressed, classed)
+        if not (filled or dressed or classed):
+            return None
+        return dict(bdtopo.PROVENANCE, buildings=filled, facades=dressed, classes=classed)
 
     @staticmethod
     def _osm(feats, got):

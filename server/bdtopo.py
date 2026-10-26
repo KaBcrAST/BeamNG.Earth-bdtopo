@@ -35,13 +35,25 @@ import gzip
 import json
 import logging
 import os
+import unicodedata
 import urllib.parse
+from typing import NamedTuple
 
 import numpy as np
 
 import polygon
 
 log = logging.getLogger("earthd.bdtopo")
+
+
+class Vals(NamedTuple):
+    """What one BD TOPO building has to give an Overture footprint."""
+    height: float
+    roof_height: float | None
+    num_floors: float | None
+    facade: str | None
+    roof_material: str | None
+    cls: str | None
 
 WFS = "https://data.geopf.fr/wfs/ows"
 LAYER = "BDTOPO_V3:batiment"
@@ -50,7 +62,8 @@ MAX_PAGES = 8                   # 40k buildings a cell, far above the densest (c
 # only what the join needs: the service sends every attribute otherwise, five times the bytes
 PROPS = ("geometrie", "hauteur", "nombre_d_etages",
          "altitude_minimale_sol", "altitude_minimale_toit", "altitude_maximale_toit",
-         "materiaux_des_murs", "materiaux_de_la_toiture")
+         "materiaux_des_murs", "materiaux_de_la_toiture",
+         "nature", "usage_1", "usage_2", "construction_legere", "nombre_de_logements")
 # metropolitan France and Corsica, as imagery_regional's "france" row: the overseas departements have their own
 # BD TOPO extents and are left for later
 FRANCE = (-5.20, 41.30, 9.60, 51.10)        # west, south, east, north
@@ -75,6 +88,36 @@ ROOF_CODES = {"1": "roof_tiles", "2": "slate", "3": "metal", "4": "concrete"}
 # own order, not the digits'), so the facade takes the outer skin a French building of that pair normally shows.
 WALL_RANK = ("brick", "stone", "wood", "concrete", "concrete_block")
 ROOF_RANK = ("slate", "roof_tiles", "metal", "concrete")
+
+# What the building IS. Overture gives a class to 15 % of a French cell's buildings (central Lille: 764 of 4957),
+# and plan() keys almost every decision on it: storefronts, blank walls, windows, a church's steeple, a shed's
+# roof. BD TOPO names the use of about two thirds of them, so the two fields below are worth far more than their
+# bytes. Both enumerations are closed and are mapped whole (bdtopoexplorer.ign.fr/batiment, read 2026-10-26):
+# 14 natures, 8 usages. The values map onto the words buildings.py already groups (HOUSE_CLASSES, SHOP_CLASSES,
+# INDUSTRIAL_CLASSES, CHURCH_CLASSES, BARN_CLASSES, SHED_CLASSES); where no word of its own fits, None leaves
+# plan()'s footprint and area rules to decide, which they do better than a wrong label.
+NATURE_CLASS = {
+    "eglise": "church", "chapelle": "chapel", "serre": "greenhouse",
+    # no class of their own: a castle, keep, fort, silo, grandstand, windmill, monument, triumphal arch or
+    # antique theatre styled as a house or a shop would be worse than plan()'s own reading of the footprint
+    "chateau": None, "tour, donjon": None, "fort, blockhaus, casemate": None, "silo": None, "tribune": None,
+    "moulin a vent": None, "monument": None, "arc de triomphe": None, "arene ou theatre antique": None,
+    "indifferenciee": None,
+}
+# The one nature that names three different things at once, so it must not beat a usage that is specific: of the
+# 139 buildings carrying it in a Flanders sample of 5000, only 51 had no usage, while 25 were shops and 41
+# annexes, and those would have come out as metal-walled sheds (measured 2026-10-26).
+NATURE_VAGUE = {"industriel, agricole ou commercial": "industrial"}
+USAGE_CLASS = {
+    "residentiel": "residential",       # refined by nombre_de_logements below
+    "annexe": "shed",                   # the garage or garden shed beside a house
+    "commercial et services": "retail",
+    "industriel": "industrial",
+    "agricole": "barn",
+    "religieux": "church",
+    "sportif": None,                    # a sports hall is a big shed: plan()'s area rules read it better
+    "indifferencie": None,
+}
 
 PROVENANCE = {
     "id": "ign-bdtopo",
@@ -196,9 +239,38 @@ def material(code, codes, rank):
     return None
 
 
+def _fold(v):
+    """A BD TOPO enumeration value as a lower-case accent-free key ("Resi(e)dentiel" -> "residentiel")."""
+    s = unicodedata.normalize("NFKD", str(v or "").strip())
+    return "".join(c for c in s if not unicodedata.combining(c)).lower()
+
+
+def building_class(props):
+    """The buildings.py class of one BD TOPO record, or None when the record has no opinion.
+
+    A nature that names one thing wins over the use; a light construction is a shelter whatever it is used for
+    (a light dwelling is a mobile home, which buildings.py calls static_caravan); a residential building is a
+    house or a block of flats by its number of dwellings, which BD TOPO gives for about half of them; and the
+    one vague nature is kept for last, behind both uses."""
+    nat = NATURE_CLASS.get(_fold(props.get("nature")))
+    if nat:
+        return nat
+    light = props.get("construction_legere") is True
+    use = USAGE_CLASS.get(_fold(props.get("usage_1")))
+    if use == "residential":
+        if light:
+            return "static_caravan"
+        homes = _num(props.get("nombre_de_logements"), zero_missing=True)
+        return "house" if homes == 1.0 else ("apartments" if homes is not None else "residential")
+    if light:
+        return "shed"
+    # nothing from usage_1: its annexe or commercial second use still says more than no class at all
+    return use or USAGE_CLASS.get(_fold(props.get("usage_2"))) \
+        or NATURE_VAGUE.get(_fold(props.get("nature")))
+
+
 def values(props):
-    """(height, roof_height, num_floors, facade_material, roof_material) of one BD TOPO record, or None when it
-    has no usable height.
+    """The Vals of one BD TOPO record, or None when it has no usable height.
 
     height is the top of the roof above the lowest ground the building stands on, which is what buildings.plan()
     draws; "hauteur" stands in where the altitudes are missing."""
@@ -220,9 +292,10 @@ def values(props):
     floors = _num(props.get("nombre_d_etages"), zero_missing=True)
     if floors is not None and not (1.0 <= floors <= 150.0):
         floors = None
-    wall = material(props.get("materiaux_des_murs"), WALL_CODES, WALL_RANK)
-    roof_mat = material(props.get("materiaux_de_la_toiture"), ROOF_CODES, ROOF_RANK)
-    return height, roof, floors, wall, roof_mat
+    return Vals(height=height, roof_height=roof, num_floors=floors,
+                facade=material(props.get("materiaux_des_murs"), WALL_CODES, WALL_RANK),
+                roof_material=material(props.get("materiaux_de_la_toiture"), ROOF_CODES, ROOF_RANK),
+                cls=building_class(props))
 
 
 def _num(v, zero_missing=False):
@@ -284,13 +357,13 @@ class _Grid:
 
 
 def join(feats, records):
-    """Give every building of feats that has no height (or no facade material) the values of the BD TOPO
-    footprint its own footprint centre falls in.
+    """Give every building of feats that has no height (or no facade material, or no class) the values of the
+    BD TOPO footprint its own footprint centre falls in.
 
-    Returns (heights filled in, facades named); feats is changed in place."""
+    Returns (heights filled in, facades named, classes named); feats is changed in place."""
     n = len(feats)
     if not n or not records:
-        return 0, 0
+        return 0, 0, 0
     grid = _Grid(records)
     height = _column(feats, "height", n)
     roof = _column(feats, "roof_height", n)
@@ -298,33 +371,37 @@ def join(feats, records):
     src = _text(feats, "height_src", n)
     facade = _text(feats, "facade_material", n)
     roof_mat = _text(feats, "roof_material", n)
-    filled, dressed = 0, 0
+    klass = _text(feats, "class", n)
+    filled, dressed, classed = 0, 0, 0
     for i in range(n):
         ring = _outer(feats, i)
         if ring is None:
             continue
         known = height[i] is not None          # Overture or OSM already knows this one's height
-        if known and facade[i] and roof_mat[i]:
+        if known and facade[i] and roof_mat[i] and klass[i]:
             continue                            # nothing left to give it
         vals = grid.find(float(ring[:, 0].mean()), float(ring[:, 1].mean()), _ring_area_m2(ring))
         if vals is None:
             continue
-        h, rh, nf, wall, rmat = vals
         if not known:
-            height[i] = h
-            if rh is not None and roof[i] is None:
-                roof[i] = rh
-            if nf is not None and floors[i] is None:
-                floors[i] = nf
+            height[i] = vals.height
+            if vals.roof_height is not None and roof[i] is None:
+                roof[i] = vals.roof_height
+            if vals.num_floors is not None and floors[i] is None:
+                floors[i] = vals.num_floors
             src[i] = SOURCE
             filled += 1
         # the facade and the roof skin: only where the mapped data has none (buildings.plan() reads
         # facade_material already, so a brick town stops coming out as plaster)
-        if wall and not facade[i]:
-            facade[i] = wall
+        if vals.facade and not facade[i]:
+            facade[i] = vals.facade
             dressed += 1
-        if rmat and not roof_mat[i]:
-            roof_mat[i] = rmat
+        if vals.roof_material and not roof_mat[i]:
+            roof_mat[i] = vals.roof_material
+        # what the building is: Overture's own class is the more precise where it has one
+        if vals.cls and not klass[i]:
+            klass[i] = vals.cls
+            classed += 1
     if filled:
         feats.attrs["height"] = _floats(height)
         feats.attrs["roof_height"] = _floats(roof)
@@ -333,7 +410,9 @@ def join(feats, records):
     if dressed:
         feats.attrs["facade_material"] = np.array([v or "" for v in facade])
         feats.attrs["roof_material"] = np.array([v or "" for v in roof_mat])
-    return filled, dressed
+    if classed:
+        feats.attrs["class"] = np.array([v or "" for v in klass])
+    return filled, dressed, classed
 
 
 def _outer(feats, i):
