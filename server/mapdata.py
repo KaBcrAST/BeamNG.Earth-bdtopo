@@ -93,7 +93,9 @@ VERSION = 2                     # pipeline version: bump when what a cell's laye
 # buildings 1: IGN BD TOPO heights joined in over France (bdtopo.py); the cached cells guessed them
 # buildings 2: the BD TOPO use and materials too (facade_material, roof_material, class)
 # buildings 3: roof shapes from the IGN LiDAR HD height model over France (roofs.py)
-LAYER_VERSIONS = {"roads": 6, "buildings": 3}
+LAYER_VERSIONS = {"roads": 6, "buildings": 4}
+                                # (4: the LiDAR roofs' ridge direction and roof height, which the mesh
+                                # builder now lays the ridge and the pitch from)
                                 # (2: clipped polygon pieces `own`ed by their cell, exact cell edges,
                                 # the exact no-area test of clipped rings)
 VECTOR_LAYERS = ("roads", "connectors", "buildings", "water", "land_use", "infrastructure", "building_parts", "places")
@@ -459,8 +461,9 @@ class MapData:
                         key, type(e).__name__, e)
             revisit.fault()
             return None
-        named = roofs.join(feats, raster, bounds)
-        log.info("mapdata: IGN LiDAR roof shapes for %d of %d buildings in %s", named, len(feats), key)
+        named, ridged, raised = roofs.join(feats, raster, bounds)
+        log.info("mapdata: IGN LiDAR roofs for %d of %d buildings in %s (%d ridge directions, %d roof heights)",
+                 named, len(feats), key, ridged, raised)
         return dict(roofs.PROVENANCE, buildings=named) if named else None
 
     @staticmethod

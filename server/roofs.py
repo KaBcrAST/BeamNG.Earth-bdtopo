@@ -53,6 +53,10 @@ LONG_RIDGE = 0.55               # the top runs this much of an axis -> a ridge l
 SHORT_RIDGE = 0.38              # ... this little -> a hip or a point
 POINT_RIDGE = 0.22              # ... this little on both -> a pyramid
 MIN_BUILDING_M = 2.0            # m, below it the LiDAR saw no building here (a flight older than the house)
+HEIGHT_SHRINK = 0.70            # the footprint pulled in harder for the roof HEIGHT than for the shape ...
+HEIGHT_LO, HEIGHT_HI = 35, 98   # ... and read between these percentiles (calibrated in height_of)
+HEIGHT_MIN_PIX = 20             # pixels needed before a height is believed at all
+MIN_ROOF_M, MAX_ROOF_M = 0.8, 25.0      # a roof height outside this is not one
 
 PROVENANCE = {
     "id": "ign-lidarhd",
@@ -125,12 +129,13 @@ def _axes(ring):
     return u, np.array([-u[1], u[0]]), kx
 
 
-def _pixels(a, ring, bounds):
-    """(heights, pixel x, pixel y) of the footprint, pulled in by SHRINK; (None, None, None) when too small."""
+def _pixels(a, ring, bounds, shrink=None):
+    """(heights, pixel x, pixel y) of the footprint, pulled in by shrink (default SHRINK); (None, None, None)
+    when too small."""
     west, south, east, north = bounds
     h, w = a.shape
     c = ring.mean(axis=0)
-    inner = c + (ring - c) * SHRINK
+    inner = c + (ring - c) * (SHRINK if shrink is None else shrink)
     xs = (inner[:, 0] - west) / (east - west) * w
     ys = (north - inner[:, 1]) / (north - south) * h
     x0, x1 = int(np.floor(xs.min())), int(np.ceil(xs.max())) + 1
@@ -151,7 +156,8 @@ def _pixels(a, ring, bounds):
 def shape_of(hgt, px, py, ring, bounds, shape_w, shape_h):
     """(shape, ridge bearing in degrees or None) of one roof, or (None, None) when the raster has no building.
 
-    The bearing is the ridge's, 0-180 degrees clockwise from north, which is what Overture's roof_direction is."""
+    The bearing is the ridge's, 0-180 degrees clockwise from north. The relief measured here is only used to
+    tell the shapes apart and is NOT the roof height: see height_of, which needs its own, tighter footprint."""
     hi = float(np.percentile(hgt, 98))
     lo = float(np.percentile(hgt, 12))
     if hi < MIN_BUILDING_M:
@@ -177,6 +183,9 @@ def shape_of(hgt, px, py, ring, bounds, shape_w, shape_h):
         q = proj[top]
         return float(np.percentile(q, 95) - np.percentile(q, 5)) / full
 
+    def bearing(axis):
+        return float(np.degrees(np.arctan2(axis[0], axis[1])) % 180.0)
+
     su, sv = span(pu), span(pv)
     if su >= LONG_RIDGE and sv <= SHORT_RIDGE:
         axis = u
@@ -184,39 +193,82 @@ def shape_of(hgt, px, py, ring, bounds, shape_w, shape_h):
         axis = v
     elif su <= SHORT_RIDGE and sv <= SHORT_RIDGE:
         # the top is a patch, not a line: a hip, or a point when it is tight on both axes
-        return ("pyramidal" if max(su, sv) < POINT_RIDGE else "hipped"), None
+        if max(su, sv) < POINT_RIDGE:
+            return "pyramidal", None            # a point has no direction
+        return "hipped", bearing(u if su >= sv else v)
     else:
-        return "hipped", None                   # neither a clean line nor a point: a hip is the safe middle
-    return "gabled", float(np.degrees(np.arctan2(axis[0], axis[1])) % 180.0)
+        # neither a clean line nor a point: a hip is the safe middle, laid on whichever axis the top runs
+        # further along (a hipped roof still has a short ridge, and it still faces a way)
+        return "hipped", bearing(u if su >= sv else v)
+    return "gabled", bearing(axis)
+
+
+def height_of(raster, ring, bounds):
+    """The eaves-to-ridge height (m) of one footprint's roof, or None when it cannot be read.
+
+    Its own measurement, not shape_of's relief. At 1 m per pixel a footprint's edge pixels mix roof and
+    ground, so a percentile taken over the lightly shrunk footprint the classifier uses reads far too low
+    at the eaves and the relief comes out too big: against BD TOPO's own surveyed roof heights over Bailleul
+    (1368 buildings, 2026-10-28), shape_of's 0.88 / 12-98 reads +2.02 m too high at the median and lands
+    within a metre of the survey on 26 % of them, while this 0.70 / 35-98 reads -0.05 m at the median and
+    within a metre on 54 %. The pitch that comes out of it is closer than the region's constant on 84 % of
+    the roofs (median error 6.6 deg against 16.9 deg), which is why the second rasterisation is paid for."""
+    hgt, _px, _py = _pixels(raster, ring, bounds, HEIGHT_SHRINK)
+    if hgt is None or len(hgt) < HEIGHT_MIN_PIX:
+        return None
+    h = float(np.percentile(hgt, HEIGHT_HI) - np.percentile(hgt, HEIGHT_LO))
+    return h if MIN_ROOF_M <= h <= MAX_ROOF_M else None
 
 
 def join(feats, raster, bounds):
-    """Give every building of feats with no mapped roof shape the one its footprint's LiDAR says.
+    """Give every building of feats with no mapped roof shape the shape, ridge bearing and roof height its
+    footprint's LiDAR says.
 
-    Returns how many were named; feats is changed in place."""
+    Returns (shapes named, ridges named, heights named); feats is changed in place.
+
+    The bearing goes in as ridge_direction, our own field rather than Overture's roof_direction, because
+    OpenStreetMap's roof:direction is the way the roof FACES and this is the ridge's own line; and the
+    height as roof_height, which plan() already reads where the mapped data carries one. Both matter now
+    and neither did when this module was written: the mesh builder laid every ridge on the footprint's long
+    side and every pitch at the region's constant, and over Bailleul that is the wrong way round for 88 %
+    of the row houses (buildings._ridge_across) and off by more than 5 degrees on 77 % of the pitches."""
     n = len(feats)
     if not n or raster is None:
-        return 0
+        return 0, 0, 0
     h, w = raster.shape
     shapes = bdtopo._text(feats, "roof_shape", n)
-    named = 0
+    # numbers, not text: plan() reads roof_height with np.isfinite, and bdtopo writes the same field as floats
+    ridges = bdtopo._column(feats, "ridge_direction", n)
+    heights = bdtopo._column(feats, "roof_height", n)
+    named = ridged = raised = 0
     for i in range(n):
-        if shapes[i]:
-            continue                            # Overture or OSM already knows this one
+        if shapes[i] and ridges[i] is not None and heights[i] is not None:
+            continue                            # Overture or OSM already knows all of it
         ring = bdtopo._outer(feats, i)
         if ring is None:
             continue
         hgt, px, py = _pixels(raster, ring, bounds)
         if hgt is None:
             continue
-        # (the ridge bearing shape_of also measures is not stored: a gable's ridge is laid on the footprint's
-        # long axis by the mesh builder (buildings.oriented_box), so there is nothing yet that could read it,
-        # and a field written for nobody is how roof_direction and roof_color got here in the first place)
-        s, _bearing = shape_of(hgt, px, py, ring, bounds, w, h)
+        s, bearing = shape_of(hgt, px, py, ring, bounds, w, h)
         if s is None:
             continue
-        shapes[i] = s
-        named += 1
+        if not shapes[i]:
+            shapes[i] = s
+            named += 1
+        if ridges[i] is None and bearing is not None:
+            ridges[i] = bearing
+            ridged += 1
+        # only for a pitched roof: a flat one's relief is its parapets and its plant, not a roof to raise
+        if heights[i] is None and s in ("gabled", "hipped"):
+            rh = height_of(raster, ring, bounds)
+            if rh is not None:
+                heights[i] = rh
+                raised += 1
     if named:
         feats.attrs["roof_shape"] = np.array([v or "" for v in shapes])
-    return named
+    if ridged:
+        feats.attrs["ridge_direction"] = bdtopo._floats(ridges)
+    if raised:
+        feats.attrs["roof_height"] = bdtopo._floats(heights)
+    return named, ridged, raised
