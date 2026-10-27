@@ -329,7 +329,7 @@ def oriented_box(p):
 class Spec:
     """What is built for one footprint (decided by plan())."""
     __slots__ = ("ring", "floors", "floor_h", "height", "roof", "roof_mat", "facade", "band", "shop", "plain", "min_h", "wall", "door", "windows", "front", "steeple", "stoop",
-                 "sign", "porch", "cls", "seed", "deck", "pitch", "portal", "gring")
+                 "sign", "porch", "cls", "seed", "deck", "pitch", "portal", "gring", "ridge_across", "roof_h")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -445,8 +445,48 @@ def brick_share(lat, lon):
     return region_style(lat, lon).brick
 
 
-def roof_pitch(spec):
-    """The roof pitch (degrees) of a Spec: its region's, else PITCH."""
+# a measured roof height implies a pitch; outside this the measurement is not believed (Bailleul's real
+# pitches, from BD TOPO roof altitudes over the footprint half-width, run 22-60 deg at the 10th-90th percentile)
+PITCH_RANGE = (8.0, 70.0)
+
+
+def _ridge_across(direction, box_u):
+    """True when a measured ridge bearing runs across the footprint's long axis (box_u), None when unknown.
+
+    A bearing is 0-180 degrees clockwise from north, as roofs.py measures it; box_u is the oriented box's
+    long axis in the anchor frame (+x east, +y north), so its own bearing is atan2(east, north)."""
+    try:
+        d = float(direction)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(d):
+        return None
+    long_bearing = math.degrees(math.atan2(float(box_u[0]), float(box_u[1]))) % 180.0
+    gap = abs(d % 180.0 - long_bearing) % 180.0
+    return min(gap, 180.0 - gap) > 45.0
+
+
+def _roof_h(attrs, roof):
+    """The eaves-to-ridge height of a pitched roof when the data measured one, else None."""
+    if roof == "flat":
+        return None
+    try:
+        v = float(attrs.get("roof_height"))
+    except (TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) and v > 0.2 else None
+
+
+def roof_pitch(spec, hw=None):
+    """The roof pitch (degrees) of a Spec: from its own measured roof height over the half-width it is drawn
+    across (roof_h, mapped or from the LiDAR), else its region's, else PITCH.
+
+    The region's pitch is one constant for every building of a region (europe_north: 42 deg), and over
+    Bailleul only 23 % of the real roofs are within 5 deg of it while they run 22-60 deg, so a street of
+    houses came out with one slope. hw is the half-width the rise is raised over, which is the footprint's
+    short half unless the ridge is laid across it (_roof swaps the axes for a row house)."""
+    if spec.roof_h and hw and hw > 0.5 and spec.roof != "flat":
+        return min(PITCH_RANGE[1], max(PITCH_RANGE[0], math.degrees(math.atan2(float(spec.roof_h), hw))))
     return spec.pitch or PITCH.get(spec.roof, PITCH["gabled"])
 
 
@@ -472,7 +512,7 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
     c = ring.mean(0)
     seed = _hash01(round(float(c[0]) * 2), round(float(c[1]) * 2), round(area)) if look is None else look
     style = region_style(lat, lon)
-    _, _, hl, hw = oriented_box(ring)
+    _, box_u, hl, hw = oriented_box(ring)
     box_fill = area / max(4 * hl * hw, 1e-6)
     cls = (attrs.get("class") or "").lower()
     name = str(attrs.get("name") or "").lower()
@@ -745,10 +785,21 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
     if porch:   # pitched roofs draw the walls on the oriented box: an L-shaped house's door wall can be inside it
         _, _, hl, hw = oriented_box(ring)
         porch = area >= 0.9 * 4 * hl * hw
+    # Which way the ridge runs, and how steep. _roof lays a ridge along the footprint's long side, which is
+    # right for a detached house, a farm or a shed and wrong for a row house: its ridge follows the street
+    # over a narrow frontage and a deep plot, so it runs ACROSS the long side. Measured over Bailleul
+    # (roofs.py's ridge bearings against this same oriented box, 2026-10-28): of the gabled roofs with a
+    # frontage under 6 m, 89 % have their ridge across the long side (median 86 deg off it), 87 % from 6 to
+    # 8.4 m, and only 32 % of those wider than 12 m (median 12 deg). So the mesh was laying two thirds of a
+    # Flemish town's roofs the wrong way round, and the data says which. No mapped direction: unchanged.
+    across = None
+    if roof in ("gabled", "hipped"):
+        across = _ridge_across(attrs.get("ridge_direction"), box_u)
     return Spec(ring=ring, floors=nf, floor_h=floor_h, height=h, roof=roof, roof_mat=roof_mat, facade=facade,
                 band=band, shop=shop and not shed and nf >= 1, plain=plain, seed=seed, min_h=0.0, wall=wall,
                 windows=windows, steeple=church and area < 2500, porch=porch, cls=cls,
-                deck=garage and roof == "flat", pitch=style.pitch)
+                deck=garage and roof == "flat", pitch=style.pitch, ridge_across=across,
+                roof_h=_roof_h(attrs, roof))
 
 
 class Mesh:
@@ -1218,10 +1269,16 @@ def _roof(m, spec, ring, z_eave, mat_idx):
         m.poly(pts, uv, rm)
         return
     c, u, hl, hw = oriented_box(ring)
+    if spec.ridge_across:
+        # the measured ridge runs across the footprint's long side, not along it: a row house, whose ridge
+        # follows the street over a narrow frontage and a deep plot (plan(), ridge_across). Everything below
+        # is in (u, v), so swapping the axes turns the whole roof, eaves, gable ends and texture with it.
+        u, hl, hw = np.array([-u[1], u[0]]), hw, hl
     v = np.array([-u[1], u[0]])
     hl2, hw2 = hl + EAVE_M, hw + EAVE_M
-    rise = hw2 * math.tan(math.radians(roof_pitch(spec)))
-    ze = z_eave - EAVE_M * math.tan(math.radians(roof_pitch(spec)))
+    pitch = roof_pitch(spec, hw2)
+    rise = hw2 * math.tan(math.radians(pitch))
+    ze = z_eave - EAVE_M * math.tan(math.radians(pitch))
     zr = ze + rise
 
     def at(s, t, z):
@@ -2338,7 +2395,8 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
             if not (x0 <= cx < x1 and y0 <= cy < y1):
                 continue
             at = {k: (a[k][i] if k in a else None) for k in
-                  ("class", "height", "num_floors", "min_height", "roof_shape", "roof_height", "name", "facade_material")}
+                  ("class", "height", "num_floors", "min_height", "roof_shape", "roof_height", "name",
+                   "facade_material", "ridge_direction")}
             hh_ = at.get("height")
             if hh_ is not None and np.isfinite(hh_) and 0 < hh_ < FLAT_FOOTPRINT_M and not parts_of.get(str(key)):
                 continue                # a mapped area, not a building (the Golden Gate toll plaza's 0.01 m footprint

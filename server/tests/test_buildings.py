@@ -930,3 +930,94 @@ class PhotoMaskTest(unittest.TestCase):
         self.assertFalse(self.at(m, 310, 310), "not a second row of the same id")
         self.assertFalse(self.at(m, 210, 210), "nor another cell's piece of it")
         self.assertTrue(self.at(m, 410, 110), "the next building")
+
+
+class RidgeTest(unittest.TestCase):
+    """The ridge is laid the way the data measured it, and the pitch raised by the height it measured.
+
+    Before this, _roof laid every ridge on the footprint's long side and raised it at the region's one
+    constant angle. Measured over Bailleul with roofs.py (2026-10-28): of the gabled roofs with a frontage
+    under 6 m, 89 % have their ridge ACROSS the long side (a row house: narrow frontage, deep plot, the ridge
+    following the street), against 32 % of those wider than 12 m; and the pitch the measured roof height
+    implies is closer to BD TOPO's surveyed one than the 42 deg constant on 84 % of them.
+    """
+
+    @staticmethod
+    def bearing_of(angle_deg):
+        """The compass bearing of rect()'s long axis when it is turned by angle_deg from east."""
+        return math.degrees(math.atan2(math.cos(math.radians(angle_deg)),
+                                       math.sin(math.radians(angle_deg)))) % 180.0
+
+    def test_no_measured_direction_leaves_the_mesh_alone(self):
+        for d in (None, "", "nan", "not a number"):
+            self.assertIsNone(bld._ridge_across(d, np.array([1.0, 0.0])), repr(d))
+
+    def test_a_ridge_along_the_long_side_is_not_across(self):
+        for angle in (0, 25, 90, 143):
+            u = np.array([math.cos(math.radians(angle)), math.sin(math.radians(angle))])
+            self.assertFalse(bld._ridge_across(self.bearing_of(angle), u), angle)
+
+    def test_a_ridge_square_to_the_long_side_is_across(self):
+        for angle in (0, 25, 90, 143):
+            u = np.array([math.cos(math.radians(angle)), math.sin(math.radians(angle))])
+            self.assertTrue(bld._ridge_across((self.bearing_of(angle) + 90.0) % 180.0, u), angle)
+
+    def test_plan_carries_the_measurements(self):
+        ring = rect(0, 0, 20, 6)                    # long axis east: its bearing is 90
+        along = bld.plan(ring, {"class": "house", "height": 9.0, "roof_shape": "gabled",
+                                "ridge_direction": 90.0, "roof_height": 2.4}, lat=50.73, lon=2.735)
+        across = bld.plan(ring, {"class": "house", "height": 9.0, "roof_shape": "gabled",
+                                 "ridge_direction": 0.0, "roof_height": 2.4}, lat=50.73, lon=2.735)
+        self.assertFalse(along.ridge_across)
+        self.assertTrue(across.ridge_across)
+        self.assertAlmostEqual(along.roof_h, 2.4)
+
+    def test_a_flat_roof_takes_neither(self):
+        spec = bld.plan(rect(0, 0, 20, 6), {"class": "retail", "height": 9.0, "roof_shape": "flat",
+                                            "ridge_direction": 0.0, "roof_height": 2.4})
+        self.assertIsNone(spec.ridge_across)
+        self.assertIsNone(spec.roof_h, "a flat roof has no roof to raise")
+
+    def test_the_pitch_comes_from_the_measured_height(self):
+        spec = bld.plan(rect(0, 0, 20, 6), {"class": "house", "height": 9.0, "roof_shape": "gabled",
+                                            "roof_height": 3.0}, lat=50.73, lon=2.735)
+        # 3 m of ridge over a 3 m half-width is 45 degrees, whatever the region says
+        self.assertAlmostEqual(bld.roof_pitch(spec, 3.0), 45.0, places=4)
+        self.assertNotAlmostEqual(bld.roof_pitch(spec, 3.0), spec.pitch or 0.0, places=1)
+
+    def test_an_absurd_measurement_is_clamped(self):
+        spec = bld.plan(rect(0, 0, 20, 6), {"class": "house", "height": 9.0, "roof_shape": "gabled",
+                                            "roof_height": 30.0}, lat=50.73, lon=2.735)
+        self.assertEqual(bld.roof_pitch(spec, 0.6), bld.PITCH_RANGE[1])
+
+    def test_without_a_height_the_region_still_decides(self):
+        spec = bld.plan(rect(0, 0, 20, 6), {"class": "house", "height": 9.0, "roof_shape": "gabled"},
+                        lat=50.73, lon=2.735)
+        self.assertIsNone(spec.roof_h)
+        self.assertEqual(bld.roof_pitch(spec, 3.0), spec.pitch or bld.PITCH["gabled"])
+
+    def ridge_line(self, attrs):
+        """The direction of the built roof's ridge, as a bearing, from the highest vertices of the mesh."""
+        ring = rect(0, 0, 20, 6)
+        spec = bld.plan(ring, dict(attrs), lat=50.73, lon=2.735)
+        P = bld.build([(spec, 0.0, 0.0)])[0]
+        top = P[P[:, 2] > P[:, 2].max() - 0.05][:, :2]
+        self.assertGreater(len(top), 1, "a ridge is a line of vertices")
+        d = top.max(0) - top.min(0)
+        return math.degrees(math.atan2(d[0], d[1])) % 180.0, spec
+
+    def test_the_built_ridge_turns_with_the_data(self):
+        base = {"class": "house", "height": 9.0, "roof_shape": "gabled", "roof_height": 2.4}
+        along, s1 = self.ridge_line(dict(base, ridge_direction=90.0))
+        across, s2 = self.ridge_line(dict(base, ridge_direction=0.0))
+        self.assertFalse(s1.ridge_across)
+        self.assertTrue(s2.ridge_across)
+        self.assertAlmostEqual(along, 90.0, delta=5.0, msg="along the 20 m side, which bears 90")
+        self.assertAlmostEqual(across, 0.0, delta=5.0, msg="across it, over the 6 m frontage")
+
+    def test_the_turned_roof_still_faces_outward(self):
+        """The whole mesh is built in (u, v); swapping the axes must not turn any triangle inward."""
+        mt = MeshTest("test_flat_box")
+        for direction in (0.0, 90.0):
+            mt.check_outward(rect(0, 0, 20, 6), {"class": "house", "height": 9.0, "roof_shape": "gabled",
+                                                 "roof_height": 2.4, "ridge_direction": direction})

@@ -208,7 +208,11 @@ class ShapeTest(unittest.TestCase):
             put_hip(a, y0, y1, x0, x1, 3.0, 9.0)
         s, bearing = self.shape(draw, 0.30, 0.30, 0.46, 0.42)
         self.assertIn(s, ("hipped", "pyramidal"))
-        self.assertIsNone(bearing, "a hip has no ridge line to point along")
+        if s == "hipped":
+            self.assertIsNotNone(bearing, "a hip still has a short ridge, and it still faces a way")
+            self.assertTrue(0.0 <= bearing < 180.0)
+        else:
+            self.assertIsNone(bearing, "a point has no direction")
 
     def test_no_building_in_the_flight(self):
         """The LiDAR is older than the house: bare ground, so plan() keeps its guess rather than getting 'flat'."""
@@ -235,26 +239,48 @@ class JoinTest(unittest.TestCase):
 
     def test_names_the_shapes(self):
         f = buildings([self.gable, self.flat])
-        self.assertEqual(roofs.join(f, self.a, BOUNDS), 2)
+        self.assertEqual(roofs.join(f, self.a, BOUNDS)[0], 2)
         self.assertEqual(str(f.attrs["roof_shape"][0]), "gabled")
         self.assertEqual(str(f.attrs["roof_shape"][1]), "flat")
 
     def test_a_mapped_shape_is_kept(self):
         f = buildings([self.gable, self.flat], shapes=["dome", ""])
-        self.assertEqual(roofs.join(f, self.a, BOUNDS), 1)
+        self.assertEqual(roofs.join(f, self.a, BOUNDS)[0], 1)
         self.assertEqual(str(f.attrs["roof_shape"][0]), "dome", "Overture's own shape is the more precise")
         self.assertEqual(str(f.attrs["roof_shape"][1]), "flat")
 
-    def test_no_ridge_direction_is_written(self):
-        """It is measured but nothing reads it yet (the mesh lays a gable on the footprint's long axis), and a
-        field written for nobody is how roof_direction got into the download in the first place."""
+    def test_the_ridge_direction_and_the_roof_height_are_written(self):
+        """Both are read now: buildings._ridge_across turns the mesh's roof when the ridge runs across the
+        footprint's long side, and roof_pitch raises it by the measured height instead of the region's angle.
+        Overture's own roof_direction is left alone: OSM's roof:direction is the way the roof FACES."""
         f = buildings([self.gable])
-        roofs.join(f, self.a, BOUNDS)
+        named, ridged, raised = roofs.join(f, self.a, BOUNDS)
+        self.assertEqual((named, ridged, raised), (1, 1, 1))
         self.assertNotIn("roof_direction", f.attrs)
+        b = float(f.attrs["ridge_direction"][0])
+        self.assertTrue(0.0 <= b < 180.0)
+        self.assertGreater(float(f.attrs["roof_height"][0]), roofs.MIN_ROOF_M)
+        self.assertLess(float(f.attrs["roof_height"][0]), 6.0, "never above the real 9 - 3 m (HeightTest)")
+
+    def test_a_flat_roof_gets_no_roof_height(self):
+        """A flat roof's relief is its parapets and its plant, not a roof to raise."""
+        f = buildings([self.flat])
+        named, ridged, raised = roofs.join(f, self.a, BOUNDS)
+        self.assertEqual((named, raised), (1, 0))
+        self.assertNotIn("roof_height", f.attrs)
+
+    def test_mapped_values_are_kept(self):
+        f = buildings([self.gable])
+        f.attrs["ridge_direction"] = np.array([17.0])
+        f.attrs["roof_height"] = np.array([2.5])
+        _n, ridged, raised = roofs.join(f, self.a, BOUNDS)
+        self.assertEqual((ridged, raised), (0, 0))
+        self.assertEqual(float(f.attrs["ridge_direction"][0]), 17.0)
+        self.assertEqual(float(f.attrs["roof_height"][0]), 2.5)
 
     def test_nothing_to_join(self):
-        self.assertEqual(roofs.join(buildings([self.gable]), None, BOUNDS), 0)
-        self.assertEqual(roofs.join(buildings([]), self.a, BOUNDS), 0)
+        self.assertEqual(roofs.join(buildings([self.gable]), None, BOUNDS), (0, 0, 0))
+        self.assertEqual(roofs.join(buildings([]), self.a, BOUNDS), (0, 0, 0))
 
     def test_the_shapes_are_words_plan_accepts(self):
         """buildings.plan() takes a mapped roof_shape straight through for these three."""
@@ -265,6 +291,58 @@ class JoinTest(unittest.TestCase):
         for s in set(str(v) for v in f.attrs["roof_shape"]) | {"hipped", "pyramidal"}:
             spec = bld.plan(ring, {"class": "house", "height": 9.0, "roof_shape": s}, lat=50.73, lon=2.735)
             self.assertIn(spec.roof, ("flat", "gabled", "hipped"), s)
+
+
+class HeightTest(unittest.TestCase):
+    """height_of: its own measurement, tighter than the one that tells the shapes apart."""
+
+    def setUp(self):
+        self.px = 400
+        self.a = canvas(self.px)
+        put_gable(self.a, int(0.58 * self.px), int(0.70 * self.px), int(0.30 * self.px), int(0.50 * self.px),
+                  3.0, 9.0, along_x=True)
+        self.gable = ring_of(BOUNDS, 0.30, 0.30, 0.50, 0.42)
+
+    def test_it_rises_with_the_real_roof_height(self):
+        """The percentiles are calibrated against BD TOPO's surveyed heights on the real raster (height_of:
+        -0.05 m at the median over 1368 buildings), where a footprint's edge pixels mix roof and ground. On a
+        synthetic roof with no such edge there is nothing to cancel, so it reads low by that calibration; what
+        a drawn roof needs from it, and what is asserted here, is that it tracks the real height."""
+        got = []
+        for ridge in (5.0, 7.0, 9.0, 12.0):
+            a = canvas(self.px)
+            put_gable(a, int(0.58 * self.px), int(0.70 * self.px), int(0.30 * self.px), int(0.50 * self.px),
+                      3.0, ridge, along_x=True)
+            h = roofs.height_of(a, self.gable, BOUNDS)
+            self.assertIsNotNone(h, ridge)
+            got.append(h)
+        self.assertEqual(got, sorted(got), "a taller ridge must read taller")
+        self.assertGreater(got[-1] - got[0], 2.0, "and it must move with it, not hover")
+        for h, ridge in zip(got, (5.0, 7.0, 9.0, 12.0)):
+            self.assertLess(h, ridge - 3.0 + 0.5, "it never reads above the real eaves-to-ridge height")
+
+    def test_it_reads_its_own_footprint_not_the_classifier_s(self):
+        """A regression on the bug this fixes: shape_of's lightly shrunk footprint reads the roof too tall,
+        because at 1 m a pixel the edge mixes roof and ground (+2.02 m at the median over Bailleul)."""
+        self.assertEqual(roofs.SHRINK, 0.88)
+        self.assertLess(roofs.HEIGHT_SHRINK, roofs.SHRINK)
+        self.assertGreater(roofs.HEIGHT_LO, 12)
+
+    def test_it_never_touches_the_module_s_own_shrink(self):
+        """mapdata builds its layers on a thread pool, so a height read must not move a module global."""
+        before = roofs.SHRINK
+        roofs.height_of(self.a, self.gable, BOUNDS)
+        roofs.height_of(self.a, ring_of(BOUNDS, 0.30, 0.30, 0.3004, 0.3004), BOUNDS)
+        self.assertEqual(roofs.SHRINK, before)
+        # and the classifier still reads its own, wider footprint
+        wide = roofs._pixels(self.a, self.gable, BOUNDS)[0]
+        tight = roofs._pixels(self.a, self.gable, BOUNDS, roofs.HEIGHT_SHRINK)[0]
+        self.assertGreater(len(wide), len(tight))
+
+    def test_an_impossible_height_is_refused(self):
+        flat = canvas(self.px)
+        put_flat(flat, int(0.58 * self.px), int(0.70 * self.px), int(0.30 * self.px), int(0.50 * self.px), 6.0)
+        self.assertIsNone(roofs.height_of(flat, self.gable, BOUNDS), "a flat roof has no height to read")
 
 
 class ProvenanceTest(unittest.TestCase):
