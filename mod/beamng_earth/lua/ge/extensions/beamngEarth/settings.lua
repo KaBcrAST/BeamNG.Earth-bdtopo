@@ -41,7 +41,7 @@ M.SCHEMA = {
     max = rebase.MAX_DISTANCE, label = 'Rebase distance (m)' },
   viewDistanceMode = { kind = 'enum', default = 'horizon', values = { 'fixed', 'horizon' }, label = 'View distance' },
   viewDistanceKm = { kind = 'number', default = 100, min = 20, max = 1000, label = 'Fixed view distance (km)' },
-  hazeStrength = { kind = 'number', default = 0, min = 0, max = 1, label = 'Distance haze (placeholder)' },
+  hazeStrength = { kind = 'number', default = 0, min = 0, max = 1, label = 'Distance haze' },
   skyMode = { kind = 'enum', default = 'real', values = { 'real', 'manual' }, label = 'Sky' },
   clouds = { kind = 'bool', default = true, label = 'Clouds' },
   weatherMode = { kind = 'enum', default = 'real', values = { 'real', 'manual' }, label = 'Weather' },
@@ -272,7 +272,7 @@ M.APPLY = {
     local dev = ext('beamngEarth_dev')
     if dev and dev.setParam then dev.setParam('mapKm', v) end
   end,
-  -- hazeStrength: a placeholder until the haze exists (v1.4 M1h)
+  hazeStrength = function(v) require('beamngEarth/haze').set(v) end,
 }
 
 function M.apply(key)

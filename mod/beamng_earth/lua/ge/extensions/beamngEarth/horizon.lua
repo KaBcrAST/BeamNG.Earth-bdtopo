@@ -11,16 +11,12 @@
 --     farfield.R_EARTH), so both horizons use one sphere. The level's value comes back when horizon
 --     mode ends (a server without it) or before the level unloads.
 --
--- TODO(M1h, distance haze; the lead tunes it in-game during P12): real visibility is haze-limited
--- (50-150 km on most days), so mountains at 150-300 km should fade to faint silhouettes instead of
--- ending at a hard edge. The knobs, all through core_environment (core/environment.lua) or the sky:
---   * core_environment.setFogDensity(d): LevelInfo.fogDensity + postApply (the level has 4e-5;
---     core_environment.getState() reports it x1000 as `fogDensity`);
---   * core_environment.setFogAtmosphereHeight(h): LevelInfo.FogAtmosphereHeight + postApply, how
---     high the fog reaches (matters at altitude: at 10 km the camera is above it);
---   * the sky's aerial perspective: ScatterSky atmoMieScattering / atmoMieExtinction
---     (setField(name, 0, 'r g b'), as celestial.lua applyAtmosphere does) and atmoMieScaleHeight.
--- Nothing here touches them yet.
+-- Distance haze (the M1h TODO) is done, in haze.lua: the settings' hazeStrength drives
+-- core_environment.setFogDensity / setFogAtmosphereHeight, and the fade now reaches high enough to
+-- cover what the far field draws (the level's fogAtmosphereHeight of 1000 m was the hard edge, not
+-- its density). Still open there: the sky's own aerial perspective, ScatterSky atmoMieScattering /
+-- atmoMieExtinction (setField(name, 0, 'r g b'), as celestial.lua applyAtmosphere does) and
+-- atmoMieScaleHeight, which is the physical way to colour the haze with the sun's position.
 
 local M = {}
 

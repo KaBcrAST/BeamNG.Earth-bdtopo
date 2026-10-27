@@ -79,6 +79,7 @@ local gasstations = require('beamngEarth/gasstations') -- pumps and the stock re
 gasstations.onCollide = roads.markCollisionDirty
 local navgraph = require('beamngEarth/navgraph')
 local postfx = require('beamngEarth/postfx')       -- no far depth-of-field blur in our level
+local haze = require('beamngEarth/haze')           -- distance haze over the far field (settings hazeStrength)
 local gps = require('beamngEarth/gps')               -- the game's GPS route to a place picked on the world map
 local collisionfoci = require('beamngEarth/collisionfoci') -- other vehicles' collision islands
 local terrainpatch = require('beamngEarth/terrainpatch')   -- ground under the islands off the terrain block
@@ -1754,6 +1755,7 @@ local function onUpdate(dtReal, dtSim)
   for k in pairs(marks) do marks[k] = nil end
   local t = hitchClock()
   postfx.update(st.inOurLevel)
+  haze.update(st.inOurLevel, settings.get('hazeStrength'))
   local stg = rawget(_G, 'beamngEarth_settings')
   if stg and stg.redirectBigMap then stg.redirectBigMap(st.inOurLevel) end
   if st.inOurLevel then gps.update(st.anchor, st.player) end
@@ -1993,6 +1995,7 @@ local function onClientEndMission()
   hudapps.unhookCityZone()
   hudapps.unhookMinimapNorth()
   postfx.restore()
+  haze.restore()
   pcall(terrainpatch.clear)
   pcall(gasstations.reset)
   pcall(farcars.reset)
@@ -2053,6 +2056,7 @@ local function onExtensionUnloaded()
   terrain.delete()
   -- M1h: the level stays loaded; give it back its sky and view distance
   horizon.restoreSky()
+  haze.restore()
   if st.visibleDistance and horizon.setVisibleDistance(VISIBLE_DISTANCE) then st.visibleDistance = nil end
 end
 
