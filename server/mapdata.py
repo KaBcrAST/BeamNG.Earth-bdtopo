@@ -69,6 +69,7 @@ import netfetch
 import overture
 import rangeread
 import revisit
+import roofs
 import staging
 import xproc
 
@@ -91,7 +92,8 @@ VERSION = 2                     # pipeline version: bump when what a cell's laye
 # roads 6: rail segments' rail_flags (is_bridge / is_tunnel) in the "flags" rule (railways.py, mpsteppe's PR #287)
 # buildings 1: IGN BD TOPO heights joined in over France (bdtopo.py); the cached cells guessed them
 # buildings 2: the BD TOPO use and materials too (facade_material, roof_material, class)
-LAYER_VERSIONS = {"roads": 6, "buildings": 2}
+# buildings 3: roof shapes from the IGN LiDAR HD height model over France (roofs.py)
+LAYER_VERSIONS = {"roads": 6, "buildings": 3}
                                 # (2: clipped polygon pieces `own`ed by their cell, exact cell edges,
                                 # the exact no-area test of clipped rings)
 VECTOR_LAYERS = ("roads", "connectors", "buildings", "water", "land_use", "infrastructure", "building_parts", "places")
@@ -125,6 +127,7 @@ CREDIT_LINES = {
                       "processed by ESA WorldCover consortium",
     "meta-wri-chm": "Canopy height: Meta & WRI",
     "ign-bdtopo": bdtopo.CREDIT_LINE,
+    "ign-lidarhd": roofs.CREDIT_LINE,
 }
 THEME_OF = {name: spec["theme"] for name, spec in overture.LAYERS.items()}
 
@@ -243,7 +246,7 @@ class MapData:
         self._locks = {}
         self._lock = threading.Lock()
         self.pool = ThreadPoolExecutor(LAYER_THREADS, thread_name_prefix="mapdata-layer")
-        self._mem = OrderedDict()           # (cell, layer) -> (decoded layer, provenance, bytes, second provenance): cell()'s LRU
+        self._mem = OrderedDict()           # (cell, layer) -> (decoded layer, provenance, bytes, further provenances): cell()'s LRU
         self._mem_bytes = 0
         self._mem_lock = threading.Lock()
         self._warm_ex = None
@@ -346,6 +349,8 @@ class MapData:
                 feats = self._osm(feats, osm.result())
             # France's buildings have almost no height in Overture / OSM: the IGN's own survey fills them in
             prov2 = self._bdtopo(key, layer, feats, kind)
+            # and the roof shapes from the IGN's LiDAR, which nothing else has (roofs.py)
+            prov3 = self._roofs(key, layer, feats, kind)
             ox, oy = mapcells.owner(feats.attrs.get("cx", np.zeros(0)), feats.attrs.get("cy", np.zeros(0)), key.z)
             feats.own = (ox == key.x) & (oy == key.y)
             if feats.clipped is not None:
@@ -354,8 +359,9 @@ class MapData:
                 feats.own |= feats.clipped
             arrays = _layer_arrays(feats)
             prov = overture.sources_provenance(THEME_OF[layer], self.release, sources) if len(feats) else None
-            if prov2 is not None:
-                arrays["provenance2"] = np.array(json.dumps(prov2, sort_keys=True))
+            for slot, p2 in (("provenance2", prov2), ("provenance3", prov3)):
+                if p2 is not None:
+                    arrays[slot] = np.array(json.dumps(p2, sort_keys=True))
         elif layer == "landcover":
             r = self.rasters.worldcover(key, kind)
             arrays = _layer_arrays(r)
@@ -429,6 +435,33 @@ class MapData:
         if not (filled or dressed or classed):
             return None
         return dict(bdtopo.PROVENANCE, buildings=filled, facades=dressed, classes=classed)
+
+    def _roofs(self, key, layer, feats, kind):
+        """Join the IGN LiDAR HD roof shapes into the cell's buildings over France (roofs.py); the provenance
+        record when any were named, else None. Optional, exactly as _bdtopo: without it the roofs keep
+        buildings.plan()'s guesses and the cell is not kept."""
+        if layer != "buildings" or self.fetcher is None or not len(feats) or not roofs.enabled():
+            return None
+        bounds = key.bounds()
+        if not roofs.covers(bounds):
+            return None
+        try:
+            raster = roofs.fetch(self.fetcher, bounds, kind)
+        except DEFERRED:
+            if kind not in ("demand", "urgent"):
+                raise
+            log.warning("mapdata: IGN LiDAR roofs of %s: the host is busy (%s); the roofs keep their guessed "
+                        "shapes", key, kind)
+            revisit.fault()
+            return None
+        except Exception as e:
+            log.warning("mapdata: IGN LiDAR roofs of %s: %s: %s; the roofs keep their guessed shapes",
+                        key, type(e).__name__, e)
+            revisit.fault()
+            return None
+        named = roofs.join(feats, raster, bounds)
+        log.info("mapdata: IGN LiDAR roof shapes for %d of %d buildings in %s", named, len(feats), key)
+        return dict(roofs.PROVENANCE, buildings=named) if named else None
 
     @staticmethod
     def _osm(feats, got):
@@ -589,15 +622,20 @@ class MapData:
             raise err
         for layer in layers:                # assembled in the caller's order, whatever finished first
             if layer in mem:                # decoded before: shared (cell layers are never changed after loading)
-                cd.layers[layer], prov, _, extra = mem[layer]
+                cd.layers[layer], prov, _, extras = mem[layer]
                 dt, hit = 0.0, True
             else:
                 arrays, hit, dt = results[layer]
                 arrays = dict(arrays)
                 prov = json.loads(str(arrays.pop("provenance")))
                 # a layer with a second source (buildings: Overture's footprints, the IGN's heights)
-                raw2 = arrays.pop("provenance2", None)
-                extra = json.loads(str(raw2)) if raw2 is not None else None
+                extras = []
+                for slot in ("provenance2", "provenance3"):
+                    raw = arrays.pop(slot, None)
+                    if raw is not None:
+                        got2 = json.loads(str(raw))
+                        if got2:
+                            extras.append(got2)
                 en = arrays.pop("en.local", None)     # (the mirror's: this frame's, Features.localize)
                 if layer in VECTOR_LAYERS:
                     f = mapgeom.Features.from_arrays(layer, arrays, "")
@@ -613,9 +651,9 @@ class MapData:
                     cd.layers[layer] = None
                 else:
                     cd.layers[layer] = _raster_from(arrays)
-                self._remember((str(key), layer), (cd.layers[layer], prov, _nbytes(arrays), extra))
-            if extra:
-                provs.setdefault(extra["id"], extra)
+                self._remember((str(key), layer), (cd.layers[layer], prov, _nbytes(arrays), extras))
+            for ex in (extras or ()):          # a layer's further sources (buildings: the IGN's two)
+                provs.setdefault(ex["id"], ex)
             if prov:
                 pid = prov["id"]
                 if pid in provs:            # roads + connectors: one transportation record
