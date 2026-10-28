@@ -148,10 +148,17 @@ class _Looks:
 
 # The window sheets' bands, top of the image first (v in Collada convention: v = 1 at the image top).
 # (sheet, band index, bays per 1024 px)
-BAND_TALL = (0, 3)          # m_highrise_plaster: tall windows on plaster (3 bays of uneven width)
-BAND_PANEL = (1, 4)         # square windows on panels
+# A band's third item lists the bays worth drawing: _walls then gives every bay its own quad and picks one of
+# them, hashed, so two neighbours and two floors differ. Without it the band is laid straight across the wall
+# and every building repeats the sheet's own five windows in the sheet's own order, which is what a street of
+# brick houses looked like (the user, 2026-10-28, a dusk shot of Bailleul: "en terme de texture je peux pas
+# rendre ceci plus realiste ?"). The sheet survey, 2026-10-28:
+BAND_TALL = (0, 3)          # m_highrise_plaster: tall windows on plaster (3 bays of UNEVEN width: no swapping,
+                            # a bay drawn in another bay's width stretches its frame)
+BAND_PANEL = (1, 4, (0, 1, 2, 3))   # square windows on panels, four even bays, all four usable
 BAND_SASH = (2, 5, (0, 2, 3))   # sash windows on plaster (bays 1 and 4 are black "open" windows: skipped)
-BAND_BRICK = (3, 5)         # sash windows on red brick
+BAND_BRICK = (3, 5, (0, 1, 2, 3, 4))    # sash windows on red brick: five even bays (blinds, a white curtain,
+                            # bare glass, a drawn curtain, venetians), none of them black, so all five are drawn
 BAND_OFFICE = (0, 5)        # m_highrise_metal: curtain wall
 BAND_OFFICE2 = (1, 4)
 BAND_SHOP = (2, 2)          # shopfront with awnings
