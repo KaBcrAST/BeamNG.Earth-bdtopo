@@ -49,7 +49,12 @@ CORNICE_UP_M = 0.2
 # shop / office sheet, roofs, plain walls.
 FACADE_TINTS = ("bne_bld_fac_white", "bne_bld_fac_cream", "bne_bld_fac_sand", "bne_bld_fac_grey")
 PAINT_TINTS = ("bne_bld_fac_blue", "bne_bld_fac_green", "bne_bld_fac_rose", "bne_bld_fac_yellow")   # painted houses
-BRICK_TINTS = ("bne_bld_fac_white", "bne_bld_fac_brickdark", "bne_bld_fac_brickwarm")   # the brick band's
+# The brick band's tints. They multiply the sheet's one red brick, so they can only darken it or pull it
+# brown or grey: a Flemish yellow brick is out of reach until the windows leave the wall texture (see
+# BAND_BRICK). Three of them put 1499 of a Bailleul cell's 1903 facades on one of three near-identical reds
+# (the user, 2026-10-31); six is what the multiply can carry without any of them reading as painted plaster.
+BRICK_TINTS = ("bne_bld_fac_white", "bne_bld_fac_brickdark", "bne_bld_fac_brickwarm",
+               "bne_bld_fac_bricksoot", "bne_bld_fac_brickbrown", "bne_bld_fac_brickgrey")
 SHOP = "bne_bld_shop"
 OFFICE = "bne_bld_office"
 ROOF_FLAT = "bne_bld_roof_flat"
@@ -83,6 +88,9 @@ LOOKS = {
     "bne_bld_fac_white": (FACADE, (1.0, 1.0, 1.0)), "bne_bld_fac_cream": (FACADE, (1.0, 0.93, 0.80)),
     "bne_bld_fac_sand": (FACADE, (0.92, 0.82, 0.68)), "bne_bld_fac_grey": (FACADE, (0.80, 0.82, 0.84)),
     "bne_bld_fac_brickdark": (FACADE, (0.78, 0.72, 0.70)), "bne_bld_fac_brickwarm": (FACADE, (1.0, 0.88, 0.80)),
+    # a soot-dark brick, a brown one and one that has greyed: the range a multiply can reach (BRICK_TINTS)
+    "bne_bld_fac_bricksoot": (FACADE, (0.55, 0.50, 0.49)), "bne_bld_fac_brickbrown": (FACADE, (0.84, 0.70, 0.55)),
+    "bne_bld_fac_brickgrey": (FACADE, (0.70, 0.69, 0.70)),
     "bne_bld_fac_blue": (FACADE, (0.80, 0.87, 0.96)), "bne_bld_fac_green": (FACADE, (0.84, 0.92, 0.82)),
     "bne_bld_fac_rose": (FACADE, (0.99, 0.86, 0.82)), "bne_bld_fac_yellow": (FACADE, (1.0, 0.95, 0.72)),
     SHOP: (SHOP, (1.0, 1.0, 1.0)), OFFICE: (OFFICE, (1.0, 1.0, 1.0)), SIDING: (SIDING, (0.93, 0.92, 0.88)),
