@@ -364,6 +364,17 @@ class SplitTest(unittest.TestCase):
 
 
 class MeshTest(unittest.TestCase):
+    @staticmethod
+    def behind_the_wall(ring, mid):
+        """Which triangle midpoints lie inside the footprint by more than nothing and at most a reveal: the
+        faces of a window's notch. Distance from each point to the nearest edge of the ring."""
+        p = np.asarray(ring, np.float64)[:, :2]
+        a, b = p, np.roll(p, -1, axis=0)
+        ab = b - a
+        t = np.clip(((mid[:, None, :2] - a) * ab).sum(2) / np.maximum((ab * ab).sum(1), 1e-12), 0.0, 1.0)
+        d = np.linalg.norm(mid[:, None, :2] - (a + t[..., None] * ab), axis=2).min(1)
+        return (d > 1e-6) & (d <= bld.REVEAL_M + 1e-6)
+
     def check_outward(self, ring, attrs):
         spec = bld.plan(ring, attrs)
         P, UV, T, M, mats, C = bld.build([(spec, 0.0, 0.0)])
@@ -376,6 +387,11 @@ class MeshTest(unittest.TestCase):
         good |= mid[:, 2] > spec.height + bld.CORNICE_UP_M + 0.01   # roof boxes: their own outsides
         lip = (mid[:, 2] > spec.height) & (mid[:, 2] < spec.height + bld.CORNICE_UP_M + 0.01) & (np.abs(nz) < 0.01)
         good |= lip                                                   # the cornice lip's inner face, above the roof
+        # A window reveal's four returns look into the notch, across the wall, so none of them faces away
+        # from the centre. They are exactly the faces lying BEHIND the wall's own plane and no deeper than
+        # the reveal; a wall triangle wound inside sits on that plane and is still caught. Their winding is
+        # proved outright in RevealTest (the sill up, the head down, each jamb into the opening).
+        good |= self.behind_the_wall(ring, mid)
         self.assertTrue(good.all(), f"{(~good).sum()} of {len(T)} triangles face in ({spec.roof})")
         self.assertLess(M.max(), len(mats))
         return spec, P
@@ -930,3 +946,90 @@ class PhotoMaskTest(unittest.TestCase):
         self.assertFalse(self.at(m, 310, 310), "not a second row of the same id")
         self.assertFalse(self.at(m, 210, 210), "nor another cell's piece of it")
         self.assertTrue(self.at(m, 410, 110), "the next building")
+
+
+class RevealTest(unittest.TestCase):
+    """_bay_reveal: the window set back into the wall instead of printed flat on its face.
+
+    The opening inside a bay was measured off the stock sheet (BAND_OPENING, 2026-10-31): band 3's five
+    brick bays agree on an opening 57 % of the bay wide running from v 0.199 to 0.965.
+    """
+
+    def bay(self, depth=bld.REVEAL_M):
+        """One bay on a wall running east, with the building to the north: outward is -y."""
+        m = bld.Mesh()
+        bld._bay_reveal(m, (0.0, 0.0), (2.4, 0.0), 0.0, 3.0, 0.0, 0.2, 0.0, 0.25,
+                        bld.BAND_OPENING[3], (0, (255, 255, 255, 255)), depth)
+        P = np.array(m.P, np.float64).reshape(-1, 3)
+        T = np.array(m.T, np.int64).reshape(-1, 3)
+        n = np.cross(P[T[:, 1]] - P[T[:, 0]], P[T[:, 2]] - P[T[:, 0]])
+        n = n / np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-12)
+        return P, T, n, P[T].mean(1)
+
+    def test_it_is_nine_quads(self):
+        _P, T, _n, _mid = self.bay()
+        self.assertEqual(len(T), 18, "four pieces of wall, the pane and four returns")
+
+    def test_the_wall_and_the_pane_face_out(self):
+        _P, _T, n, mid = self.bay()
+        for q in range(5):                       # wall under, wall over, both piers, then the pane
+            np.testing.assert_allclose(n[2 * q], (0, -1, 0), atol=1e-9)
+        self.assertAlmostEqual(mid[8][1], bld.REVEAL_M, places=6, msg="the pane stands back by the reveal")
+        for q in range(4):
+            self.assertAlmostEqual(mid[2 * q][1], 0.0, places=9, msg="the wall stays on its face")
+
+    def test_the_four_returns_look_into_the_notch(self):
+        _P, _T, n, mid = self.bay()
+        sill, head, jamb_l, jamb_r = n[10], n[12], n[14], n[16]
+        np.testing.assert_allclose(sill, (0, 0, 1), atol=1e-9)      # an eye above it sees the sill
+        np.testing.assert_allclose(head, (0, 0, -1), atol=1e-9)     # and below, the head
+        np.testing.assert_allclose(jamb_l, (1, 0, 0), atol=1e-9)    # each jamb turns towards the other
+        np.testing.assert_allclose(jamb_r, (-1, 0, 0), atol=1e-9)
+        for t in (10, 12, 14, 16):
+            self.assertGreater(mid[t][1], 0.0, "a return lies behind the wall's face")
+            self.assertLess(mid[t][1], bld.REVEAL_M + 1e-9)
+
+    def test_the_opening_is_where_the_sheet_says(self):
+        P, _T, _n, _mid = self.bay()
+        u0, u1, v0, v1 = bld.BAND_OPENING[3]
+        back = P[np.abs(P[:, 1] - bld.REVEAL_M) < 1e-9]             # the pane's own corners
+        self.assertAlmostEqual(back[:, 0].min(), 2.4 * u0, places=6)
+        self.assertAlmostEqual(back[:, 0].max(), 2.4 * u1, places=6)
+        self.assertAlmostEqual(back[:, 2].min(), 3.0 * v0, places=6)
+        self.assertAlmostEqual(back[:, 2].max(), 3.0 * v1, places=6)
+
+    def test_a_narrow_bay_keeps_the_flat_band(self):
+        """A bay under REVEAL_MIN_BAY_M would get a reveal thinner than its own frame."""
+        self.assertGreater(bld.REVEAL_MIN_BAY_M, 2 * bld.REVEAL_M)
+        ring = rect(0, 0, 3.0, 3.0)              # 3 m walls: bays of 2.4 m hold, a 1 m one would not
+        spec = bld.plan(ring, {"class": "house", "height": 6.0}, lat=50.73, lon=2.735)
+        self.assertIsNotNone(spec)
+
+    def test_the_switch_turns_it_off(self):
+        """BNE_REVEAL=off puts every window back flat on the wall: it is the one change here that costs
+        geometry (a Bailleul cell's near buildings 490k -> 1.42M triangles, the lite mesh unmoved)."""
+        import os
+        attrs = {"class": "house", "height": 9.0, "roof_shape": "flat", "num_floors": 3}
+        # whether a house comes out brick is hashed on its position, so take the first one that does
+        ring = next((r for r in (rect(x, 0, 14, 9) for x in range(0, 400, 7))
+                     if bld.plan(r, attrs, lat=50.73, lon=2.735).band == bld.BAND_BRICK), None)
+        self.assertIsNotNone(ring, "no brick house in 57 tries, which the brick share makes impossible")
+        was = os.environ.get("BNE_REVEAL")
+        try:
+            os.environ["BNE_REVEAL"] = "off"
+            self.assertFalse(bld.reveals())
+            flat = len(bld.build([(bld.plan(ring, attrs, lat=50.73, lon=2.735), 0.0, 0.0)])[2])
+            os.environ["BNE_REVEAL"] = "on"
+            self.assertTrue(bld.reveals())
+            deep = len(bld.build([(bld.plan(ring, attrs, lat=50.73, lon=2.735), 0.0, 0.0)])[2])
+        finally:
+            os.environ.pop("BNE_REVEAL", None)
+            if was is not None:
+                os.environ["BNE_REVEAL"] = was
+        self.assertGreater(deep, flat, "the reveal adds the notch's faces")
+        self.assertTrue(bld.reveals(), "and it is on unless the player says otherwise")
+
+    def test_only_the_brick_band_has_an_opening_so_far(self):
+        """The other bands' openings are not measured yet, and a guessed one would cut their frames."""
+        self.assertEqual(set(bld.BAND_OPENING), {3})
+        self.assertEqual(bld.BAND_BRICK[0], 3)

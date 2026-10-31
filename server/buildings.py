@@ -15,6 +15,7 @@ footprints and a ground-height function; no game state.
 """
 import hashlib
 import math
+import os
 
 import numpy as np
 
@@ -865,6 +866,7 @@ def _walls(m, spec, ring, z0, z_eave, mat_idx, lite=False):
     n = len(ring)
     fac = mat_idx[spec.facade]
     pts = np.asarray(ring, np.float64)[:, :2].tolist()     # (plain floats: the arithmetic below, per bay)
+    reveal = reveals()                                     # once per wall: the bay loop below is a tile's hot path
     for i in range(n):
         a, b = ring[i], ring[(i + 1) % n]
         L = float(math.hypot(*(b - a)))
@@ -916,9 +918,15 @@ def _walls(m, spec, ring, z0, z_eave, mat_idx, lite=False):
                         if k == dk:
                             _plain_strip(m, pa, pb, za, zb, bays_per_tile, bay, v0, v1, mat)
                             continue
+                        bu0, bu1 = g / bays_per_tile, (g + 1) / bays_per_tile
+                        opening = BAND_OPENING.get(band_k) if reveal else None
+                        if opening is not None and L / nb >= REVEAL_MIN_BAY_M:
+                            # the window set back into the wall (lite meshes never reach here: the far tiles
+                            # and a near tile's distant detail keep the flat band)
+                            _bay_reveal(m, pa, pb, za, zb, bu0, bu1, v0, v1, opening, mat)
+                            continue
                         m.quad((pa[0], pa[1], za), (pb[0], pb[1], za), (pb[0], pb[1], zb), (pa[0], pa[1], zb),
-                               (g / bays_per_tile, v0), ((g + 1) / bays_per_tile, v0), ((g + 1) / bays_per_tile, v1),
-                               (g / bays_per_tile, v1), mat)
+                               (bu0, v0), (bu1, v0), (bu1, v1), (bu0, v1), mat)
                     za = zb
                     continue
             v0, v1 = _band_v(spec.band, band_k)
@@ -944,6 +952,75 @@ def _walls(m, spec, ring, z0, z_eave, mat_idx, lite=False):
             m.quad((ax, ay, za), (bx, by, za), (bx, by, zb), (ax, ay, zb),
                    (0, v0), (uu, v0), (uu, v1), (0, v1), mat)
             za = zb
+
+
+# Where the window sits inside one bay of a band, as fractions of the bay (u from its left, v up from the
+# band's bottom), so _bay_reveal can set it back into the wall instead of printing it flat on the face.
+# Measured off the sheet on 2026-10-31 by segmenting the brick (R > B + 18) in each of band 3's five bays
+# and taking the columns, then the rows within those columns, that are not brick. The five agree: the
+# opening is 57 % of the bay wide and runs from v 0.199 to 0.965 in all of them.
+BAND_OPENING = {3: (0.22, 0.79, 0.20, 0.95)}
+REVEAL_M = 0.12             # m a window stands back from the wall's face (a brick-and-a-half reveal)
+REVEAL_MIN_BAY_M = 1.2      # m: a bay narrower than this is drawn flat (the reveal would be a sliver)
+
+
+def reveals():
+    """False when the player set BNE_REVEAL=off: every window is printed flat on the wall again.
+
+    It is the one change here that costs geometry. A cell of Bailleul's near buildings go from 490k
+    triangles to 1.42M (+189 %), and the lite mesh does not move at all, so what is drawn grows only
+    within the ~500 m at which a near tile's shape drops to that lite detail (BLD_LOD_PX): about a dozen
+    road tiles. The build of a cell's buildings goes from 3.2 s to 5.7 s."""
+    return os.environ.get("BNE_REVEAL", "on").strip().lower() not in ("0", "off", "no", "false")
+
+
+def _bay_reveal(m, pa, pb, za, zb, bu0, bu1, v0, v1, opening, mat, depth=REVEAL_M):
+    """One bay with its window set back into the wall: the four pieces of wall around the opening, the four
+    returns of the reveal, and the pane itself at `depth` behind the face.
+
+    pa, pb: the bay's ends along the wall (the ring is counter-clockwise, so (dy, -dx) points out of it);
+    bu0, bu1 / v0, v1: the bay's rectangle on the sheet; opening: (u0, u1, v0, v1) within the bay."""
+    ou0, ou1, ov0, ov1 = opening
+    (ax, ay), (bx, by) = pa, pb
+    dx, dy = bx - ax, by - ay
+    L = math.hypot(dx, dy)
+    if L < 1e-6:
+        return
+    inx, iny = -dy / L * depth, dx / L * depth      # into the building, by the reveal's depth
+
+    def face(t, z, back=False):                     # a point at fraction t along the bay, height z
+        x, y = ax + dx * t, ay + dy * t
+        return (x + inx, y + iny, z) if back else (x, y, z)
+
+    def uv(t, f):                                   # the sheet point over fraction t of the bay, f up the band
+        return (bu0 + (bu1 - bu0) * t, v0 + (v1 - v0) * f)
+
+    zh = zb - za
+
+    def z_at(f):
+        return za + zh * f
+
+    zo0, zo1 = z_at(ov0), z_at(ov1)
+    # the wall around the opening: under it, over it, and the two piers either side
+    for t0, t1, f0, f1 in ((0.0, 1.0, 0.0, ov0), (0.0, 1.0, ov1, 1.0),
+                           (0.0, ou0, ov0, ov1), (ou1, 1.0, ov0, ov1)):
+        if t1 - t0 < 1e-4 or f1 - f0 < 1e-4:
+            continue
+        m.quad(face(t0, z_at(f0)), face(t1, z_at(f0)), face(t1, z_at(f1)), face(t0, z_at(f1)),
+               uv(t0, f0), uv(t1, f0), uv(t1, f1), uv(t0, f1), mat)
+    # the pane, set back; it keeps the sheet's own window so the glass and its frame still line up
+    m.quad(face(ou0, zo0, True), face(ou1, zo0, True), face(ou1, zo1, True), face(ou0, zo1, True),
+           uv(ou0, ov0), uv(ou1, ov0), uv(ou1, ov1), uv(ou0, ov1), mat)
+    # the four returns, each taking a sliver of the wall beside it so they read as the same masonry
+    su = uv(max(0.0, ou0 - 0.03), ov0)[0], uv(ou0, ov0)[0]
+    m.quad(face(ou0, zo0), face(ou1, zo0), face(ou1, zo0, True), face(ou0, zo0, True),
+           (su[0], v0), (su[1], v0), (su[1], v0), (su[0], v0), mat)                      # sill, facing up
+    m.quad(face(ou1, zo1), face(ou0, zo1), face(ou0, zo1, True), face(ou1, zo1, True),
+           (su[0], v1), (su[1], v1), (su[1], v1), (su[0], v1), mat)                      # head, facing down
+    m.quad(face(ou0, zo1), face(ou0, zo0), face(ou0, zo0, True), face(ou0, zo1, True),
+           (su[0], v1), (su[0], v0), (su[1], v0), (su[1], v1), mat)                      # jamb, left
+    m.quad(face(ou1, zo0), face(ou1, zo1), face(ou1, zo1, True), face(ou1, zo0, True),
+           (su[0], v0), (su[0], v1), (su[1], v1), (su[1], v0), mat)                      # jamb, right
 
 
 PLAIN_STRIP = 0.3           # of a bay: the plain wall between two windows of a sheet's band (centred on a bay edge)
