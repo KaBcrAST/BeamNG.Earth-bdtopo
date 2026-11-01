@@ -419,5 +419,29 @@
       {}
     ],
     "translucent": false
+  },
+  "bne_bld_brickface": {
+    "name": "bne_bld_brickface",
+    "mapTo": "bne_bld_brickface",
+    "class": "Material",
+    "version": 1.5,
+    "Stages": [
+      {
+        "baseColorMap": "/levels/beamng_earth/art/shapes/beamngEarth/brick_wall_09/brick_wall_09_diff_1k.jpg",
+        "normalMap": "/levels/beamng_earth/art/shapes/beamngEarth/brick_wall_09/brick_wall_09_nor_gl_1k.jpg",
+        "roughnessMap": "/levels/beamng_earth/art/shapes/beamngEarth/brick_wall_09/brick_wall_09_rough_1k.jpg",
+        "baseColorFactor": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "vertColor": true
+      },
+      {},
+      {},
+      {}
+    ],
+    "translucent": false
   }
 }

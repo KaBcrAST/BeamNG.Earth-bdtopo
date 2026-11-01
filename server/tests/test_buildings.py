@@ -4,6 +4,7 @@ import math
 import os
 import sys
 import tempfile
+import io
 import unittest
 from pathlib import Path
 
@@ -1119,6 +1120,62 @@ class RevealTest(unittest.TestCase):
                 os.environ["BNE_REVEAL"] = was
         self.assertGreater(deep, flat, "the reveal adds the notch's faces")
         self.assertTrue(bld.reveals(), "and it is on unless the player says otherwise")
+
+    def masonry_bay(self, u_m=0.0):
+        """One bay drawn with the real masonry (BRICKFACE) instead of the sheet's band."""
+        m = bld.Mesh()
+        sheet, brick = (3, (255, 255, 255, 255)), (0, (255, 255, 255, 255))
+        bld._bay_reveal(m, (0.0, 0.0), (2.4, 0.0), 0.0, 3.0, 0.0, 0.2, 0.0, 0.25,
+                        bld.BAND_OPENING[3], sheet, bld.REVEAL_M, brick, u_m)
+        return m, sheet, brick
+
+    def test_the_masonry_takes_the_wall_and_the_pane_keeps_the_sheet(self):
+        m, sheet, brick = self.masonry_bay()
+        mats = list(m.M)
+        self.assertEqual(mats.count(sheet[0]), 2, "the pane alone, two triangles, on the window sheet")
+        self.assertEqual(mats.count(brick[0]), 16, "the four pieces of wall and the four returns")
+
+    def test_the_masonry_is_laid_at_its_real_size(self):
+        """A wall of BRICKFACE_UV_M must span exactly one repeat, or the courses come out the wrong size."""
+        m, _sheet, _brick = self.masonry_bay()
+        uv = np.array(m.UV, np.float64).reshape(-1, 2)[:16]    # the four wall pieces, before the pane
+        P = np.array(m.P, np.float64).reshape(-1, 3)[:16]
+        wall = np.abs(P[:, 1]) < 1e-9                      # the pieces still on the wall's face
+        span_m = P[wall][:, 0].max() - P[wall][:, 0].min()
+        span_uv = uv[wall][:, 0].max() - uv[wall][:, 0].min()
+        self.assertAlmostEqual(span_uv, span_m / bld.BRICKFACE_UV_M, places=9)
+        self.assertAlmostEqual(uv[wall][:, 1].max(), 3.0 / bld.BRICKFACE_UV_M, places=9)
+
+    def test_the_courses_run_on_from_bay_to_bay(self):
+        """Each bay is laid from its own distance along the wall, so the joints line up across them."""
+        # the wall pieces are laid first, so vertex 0 is the first one's corner at the bay's start; the
+        # pane keeps the sheet's own coordinates and must be left out of this
+        first, _s, _b = self.masonry_bay(0.0)
+        second, _s2, _b2 = self.masonry_bay(2.4)
+        u1 = np.array(first.UV, np.float64).reshape(-1, 2)[0, 0]
+        u2 = np.array(second.UV, np.float64).reshape(-1, 2)[0, 0]
+        self.assertAlmostEqual(u1, 0.0, places=9)
+        self.assertAlmostEqual(u2 - u1, 2.4 / bld.BRICKFACE_UV_M, places=9)
+
+    def test_every_brick_tint_has_a_masonry_twin_of_the_same_colour(self):
+        for t in bld.BRICK_TINTS:
+            twin = t + bld.FACE_SUFFIX
+            self.assertIn(twin, bld.LOOKS, t)
+            self.assertEqual(bld.LOOKS[twin][0], bld.BRICKFACE)
+            self.assertEqual(bld.LOOKS[twin][1], bld.LOOKS[t][1], "the tint must not change with the material")
+
+    def test_the_mod_declares_the_masonry_material(self):
+        import json, os
+        p = os.path.join(os.path.dirname(__file__), "..", "..", "mod", "beamng_earth", "levels",
+                         "beamng_earth", "art", "shapes", "beamngEarth", "buildings.materials.json")
+        d = json.load(io.open(p, encoding="utf-8"))
+        self.assertIn(bld.BRICKFACE, d, "every material the server names must exist for the mod")
+        st = d[bld.BRICKFACE]["Stages"][0]
+        for k in ("baseColorMap", "normalMap", "roughnessMap"):
+            self.assertIn(k, st)
+            rel = st[k].lstrip("/").replace("levels/beamng_earth/", "")
+            full = os.path.join(os.path.dirname(p), "..", "..", "..", rel)
+            self.assertTrue(os.path.exists(os.path.normpath(full)), st[k])
 
     def test_only_the_brick_band_has_an_opening_so_far(self):
         """The other bands' openings are not measured yet, and a guessed one would cut their frames."""
