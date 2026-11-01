@@ -90,9 +90,21 @@ BRICK_WALL = "bne_bld_brick"    # plain red brick (the stock brick_plain): a gar
 # this one (160, 132, 113), a ratio of 0.98/0.98/1.06. What it buys is detail, 509 px of wall per metre
 # against the band's 85, and twice the variation between bricks (luma std 16.1 against 8.3).
 BRICKFACE = "bne_bld_brickface"
+# The window itself, once the reveal gave it a quad of its own. The stock window sheets draw SASH windows --
+# one leaf sliding over another, British and American -- and a window in the north of France is a casement of
+# two leaves with a wooden frame. The game already ships the right thing for its Italy level and the mod used
+# none of it: t_italy_bld_windows, an atlas of European casements with their curtains. Nothing to ship, it is
+# a stock path. Its four usable wall windows were found by labelling the atlas's connected regions
+# (2026-11-01) and keeping those whose aspect matches the opening: the other regions are doors, with a panel
+# below the glass, and the shop interiors of the lower half.
+WINDOW_EU = "bne_bld_window_eu"
+# (u0, u1, v0, v1) on the atlas, v up as Collada has it. Bare glass, tied striped curtains, net curtains
+# over the lower half, and a striped curtain drawn to one side.
+EU_WINDOWS = ((0.013, 0.134, 0.785, 0.975), (0.139, 0.260, 0.785, 0.975),
+              (0.264, 0.387, 0.785, 0.975), (0.503, 0.624, 0.504, 0.693))
 BRICKFACE_UV_M = 2.01       # m per repeat: the real size Poly Haven gives for the texture
 CONCRETE = "bne_bridge_concrete"  # plain concrete (tunnel.materials.json): a precast garage's skin
-MATERIALS = (ROOF_CLAY, BRICKFACE, FACADE, SHOP, OFFICE, ROOF_FLAT, ROOF_SLATE, ROOF_SHINGLE, SIDING, STUCCO, ROOF_METAL, PANEL, METALWALL,
+MATERIALS = (WINDOW_EU, ROOF_CLAY, BRICKFACE, FACADE, SHOP, OFFICE, ROOF_FLAT, ROOF_SLATE, ROOF_SHINGLE, SIDING, STUCCO, ROOF_METAL, PANEL, METALWALL,
              STONE, MARBLE, BRICK_WALL, CONCRETE)
 LOOKS = {
     "bne_bridge_steel": (METALWALL, (0.50, 0.52, 0.54)),
@@ -112,6 +124,8 @@ LOOKS = {
 }
 # Each brick tint gets a twin on the real masonry (BRICKFACE), the same colour: a building keeps the tint it
 # was given whichever of the two its wall is drawn in, so the near wall and the far band never disagree.
+# the window takes no building tint: a wooden casement is not painted with the brick's colour
+LOOKS[WINDOW_EU] = (WINDOW_EU, (1.0, 1.0, 1.0))
 FACE_SUFFIX = "|face"
 for _t in BRICK_TINTS:
     LOOKS[_t + FACE_SUFFIX] = (BRICKFACE, LOOKS[_t][1])
@@ -1011,6 +1025,7 @@ def _walls(m, spec, ring, z0, z_eave, mat_idx, lite=False, skip=()):
                     # the masonry twin of this building's tint, when the sheet's band has one (brick)
                     face_look = spec.facade + FACE_SUFFIX
                     face_mat = mat_idx[face_look] if face_look in LOOKS else None
+                    eu_mat = mat_idx[WINDOW_EU] if face_mat is not None else None
                     good = spec.band[2]
                     dk = None
                     if f == 0 and spec.door and spec.door[0] == i and spec.roof == "flat":
@@ -1029,8 +1044,13 @@ def _walls(m, spec, ring, z0, z_eave, mat_idx, lite=False, skip=()):
                             # the window set back into the wall, its masonry drawn in real brick where there
                             # is one for this facade (lite meshes never reach here: the far tiles and a near
                             # tile's distant detail keep the flat band, and the two match in colour)
+                            # a casement of its own per bay, hashed, so no two windows of a wall match
+                            pane = None
+                            if eu_mat is not None:
+                                w = EU_WINDOWS[int(_hash01(spec.seed, i, f, k, "win") * len(EU_WINDOWS))]
+                                pane = (eu_mat, w)
                             _bay_reveal(m, pa, pb, za, zb, bu0, bu1, v0, v1, opening, mat,
-                                        face=face_mat, u_m=L * k / nb)
+                                        face=face_mat, u_m=L * k / nb, pane=pane)
                             continue
                         m.quad((pa[0], pa[1], za), (pb[0], pb[1], za), (pb[0], pb[1], zb), (pa[0], pa[1], zb),
                                (bu0, v0), (bu1, v0), (bu1, v1), (bu0, v1), mat)
@@ -1081,7 +1101,8 @@ def reveals():
     return os.environ.get("BNE_REVEAL", "on").strip().lower() not in ("0", "off", "no", "false")
 
 
-def _bay_reveal(m, pa, pb, za, zb, bu0, bu1, v0, v1, opening, mat, depth=REVEAL_M, face=None, u_m=0.0):
+def _bay_reveal(m, pa, pb, za, zb, bu0, bu1, v0, v1, opening, mat, depth=REVEAL_M, face=None, u_m=0.0,
+                pane=None):
     """One bay with its window set back into the wall: the four pieces of wall around the opening, the four
     returns of the reveal, and the pane itself at `depth` behind the face.
 
@@ -1090,7 +1111,8 @@ def _bay_reveal(m, pa, pb, za, zb, bu0, bu1, v0, v1, opening, mat, depth=REVEAL_
 
     face: the masonry to draw the wall and the returns in instead of the sheet (BRICKFACE), laid at its own
     real size; u_m is then how far this bay starts along the wall, so the courses run on across the bays
-    rather than restarting at each. The pane always keeps the sheet: the window is the sheet's own."""
+    rather than restarting at each. pane: (material, (u0, u1, v0, v1)) to fill the opening with instead of
+    the sheet's own window -- a European casement off the Italy atlas (EU_WINDOWS)."""
     ou0, ou1, ov0, ov1 = opening
     (ax, ay), (bx, by) = pa, pb
     dx, dy = bx - ax, by - ay
@@ -1127,9 +1149,14 @@ def _bay_reveal(m, pa, pb, za, zb, bu0, bu1, v0, v1, opening, mat, depth=REVEAL_
             continue
         m.quad(at(t0, z_at(f0)), at(t1, z_at(f0)), at(t1, z_at(f1)), at(t0, z_at(f1)),
                wuv(t0, f0), wuv(t1, f0), wuv(t1, f1), wuv(t0, f1), wall_mat)
-    # the pane, set back; it keeps the sheet's own window so the glass and its frame still line up
-    m.quad(at(ou0, zo0, True), at(ou1, zo0, True), at(ou1, zo1, True), at(ou0, zo1, True),
-           uv(ou0, ov0), uv(ou1, ov0), uv(ou1, ov1), uv(ou0, ov1), mat)
+    # the pane, set back: its own window where one is given, else the sheet's
+    if pane is not None:
+        pm, (wu0, wu1, wv0, wv1) = pane
+        m.quad(at(ou0, zo0, True), at(ou1, zo0, True), at(ou1, zo1, True), at(ou0, zo1, True),
+               (wu0, wv0), (wu1, wv0), (wu1, wv1), (wu0, wv1), pm)
+    else:
+        m.quad(at(ou0, zo0, True), at(ou1, zo0, True), at(ou1, zo1, True), at(ou0, zo1, True),
+               uv(ou0, ov0), uv(ou1, ov0), uv(ou1, ov1), uv(ou0, ov1), mat)
     # the four returns of the reveal, in the same masonry as the wall. On the sheet they take a sliver of
     # the wall beside the opening; on real masonry they take the courses that run into the opening, which
     # is what a brick return is.

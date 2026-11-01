@@ -16,6 +16,9 @@ import buildings as bld  # noqa: E402
 import cdae  # noqa: E402
 
 
+FLOOR_H = 3.0          # bld.FLOOR_M, spelled out for the aspect check
+
+
 def rect(x, y, w, d):
     return np.array([(x, y), (x + w, y), (x + w, y + d), (x, y + d)], np.float64)
 
@@ -1293,4 +1296,58 @@ class AttrsReachPlanTest(unittest.TestCase):
         self.assertEqual(bld.roof_uv_m(bld.ROOF_CLAY + "|0"), 2.0, "the size Poly Haven gives")
         self.assertEqual(bld.roof_uv_m(bld.ROOF_SLATE + "|7"), bld.ROOF_UV_M)
         self.assertEqual(bld.roof_uv_m("not a look"), bld.ROOF_UV_M)
+
+
+class EuropeanWindowTest(unittest.TestCase):
+    """The window in the opening is a European casement off the stock Italy atlas, not the sheet's sash.
+
+    The window sheets draw sash windows, one leaf sliding over another, which is British and American; a
+    window in the north of France is a casement of two leaves in a wooden frame. The game ships the right
+    thing for its own Italy level and the mod used none of it. Nothing is shipped for this: the atlas is a
+    stock path.
+    """
+
+    @staticmethod
+    def brick_house():
+        attrs = {"class": "house", "height": 9.0, "roof_shape": "flat", "num_floors": 3}
+        ring = next(r for r in (rect(x, 0, 14, 9) for x in range(0, 400, 7))
+                    if bld.plan(r, attrs, lat=50.73, lon=2.735).band == bld.BAND_BRICK)
+        return bld.plan(ring, attrs, lat=50.73, lon=2.735)
+
+    def test_the_openings_are_filled_with_casements(self):
+        spec = self.brick_house()
+        P, UV, T, M, mats, _C = bld.build([(spec, 0.0, 0.0)])
+        self.assertIn(bld.WINDOW_EU, mats)
+        n = sum(1 for mi in M if mats[mi] == bld.WINDOW_EU)
+        self.assertGreater(n, 20, "a three-storey house has many windows")
+        self.assertEqual(n % 2, 0, "each pane is two triangles")
+
+    def test_all_four_casements_get_used(self):
+        spec = self.brick_house()
+        _P, UV, _T, M, mats, _C = bld.build([(spec, 0.0, 0.0)])
+        uv = np.array(UV, np.float64).reshape(-1, 2)
+        us = {round(float(u), 3) for u in uv[:, 0]}
+        used = {w for w in bld.EU_WINDOWS if round(w[0], 3) in us}
+        self.assertEqual(len(used), len(bld.EU_WINDOWS), "every casement should turn up on a wall this size")
+
+    def test_a_casement_is_not_stretched_into_its_opening(self):
+        """The opening is 57 % of a 2.4 m bay wide and 75 % of a 3 m floor tall, so about 0.61 across. A
+        casement far off that would be squashed or drawn out when it fills it."""
+        u0, u1, v0, v1 = bld.BAND_OPENING[3]
+        want = ((u1 - u0) * (bld.TILE_PX_M / bld.BAND_BRICK[1])) / ((v1 - v0) * FLOOR_H)
+        for w in bld.EU_WINDOWS:
+            a = (w[1] - w[0]) / (w[3] - w[2])
+            self.assertLess(abs(a - want) / want, 0.18, "casement %s is %.2f against the opening's %.2f"
+                            % (str(w), a, want))
+
+    def test_the_window_takes_no_building_tint(self):
+        """A wooden casement is not painted with the brick's colour."""
+        self.assertEqual(bld.LOOKS[bld.WINDOW_EU], (bld.WINDOW_EU, (1.0, 1.0, 1.0)))
+        import json, os
+        mp = os.path.join(os.path.dirname(__file__), "..", "..", "mod", "beamng_earth", "levels",
+                          "beamng_earth", "art", "shapes", "beamngEarth", "buildings.materials.json")
+        st = json.load(io.open(mp, encoding="utf-8"))[bld.WINDOW_EU]["Stages"][0]
+        self.assertFalse(st.get("vertColor", False), "the material must ignore the vertex colour too")
+        self.assertIn("t_italy_bld_windows", st["baseColorMap"])
+        self.assertTrue(st["baseColorMap"].startswith("/assets/"), "a stock path: nothing to ship")
 

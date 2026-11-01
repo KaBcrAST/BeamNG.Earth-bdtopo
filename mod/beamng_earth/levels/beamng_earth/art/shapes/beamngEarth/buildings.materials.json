@@ -467,5 +467,30 @@
       {}
     ],
     "translucent": false
+  },
+  "bne_bld_window_eu": {
+    "name": "bne_bld_window_eu",
+    "mapTo": "bne_bld_window_eu",
+    "class": "Material",
+    "version": 1.5,
+    "Stages": [
+      {
+        "baseColorMap": "/assets/materials/atlas/t_italy_bld_windows/t_italy_bld_windows_b.color.png",
+        "normalMap": "/assets/materials/atlas/t_italy_bld_windows/t_italy_bld_windows_nm.normal.png",
+        "roughnessMap": "/assets/materials/atlas/t_italy_bld_windows/t_italy_bld_windows_r.data.png",
+        "metallicMap": "/assets/materials/atlas/t_italy_bld_windows/t_italy_bld_windows_m.data.png",
+        "baseColorFactor": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "vertColor": false
+      },
+      {},
+      {},
+      {}
+    ],
+    "translucent": false
   }
 }
