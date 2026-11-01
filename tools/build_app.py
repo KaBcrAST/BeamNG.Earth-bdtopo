@@ -128,13 +128,31 @@ BOOT_SHIM = ("import sys\n"
              "run(sys.argv[1:])\n")
 
 
+DEFAULTS_MODULE = "bngearth_build_defaults"
+
+
+def write_defaults(work, server_args, env):
+    """Bake options and environment into this build (launcher.bundled_defaults reads them back).
+
+    A plain build writes an empty one, so nothing changes for anyone who builds the project themselves. A
+    build made for one machine can carry its own tuning, and then the executable needs nothing beside it:
+    double-clicking it is the whole of the launch."""
+    path = os.path.join(work, DEFAULTS_MODULE + ".py")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("# Baked in by tools/build_app.py; SERVER_ARGS go before the player own options." + '\n')
+        f.write("SERVER_ARGS = %r" % (tuple(server_args),) + '\n')
+        f.write("ENV = %r" % (dict(env),) + '\n')
+    return path
+
+
 def pyinstaller(work, ico, onefile, ver=None, boot=None):
     server = os.path.join(ROOT, "server")
     mods = sorted(os.path.splitext(os.path.basename(p))[0] for p in glob.glob(os.path.join(server, "*.py")))
     cmd = [sys.executable] + (["-c", BOOT_SHIM, boot] if boot else ["-m", "PyInstaller"])
     cmd += ["--noconfirm", "--clean", "--console", "--noupx", "--name", NAME,
            "--distpath", os.path.join(work, "dist"), "--workpath", os.path.join(work, "build"),
-           "--specpath", work, "--paths", server, "--paths", ROOT, "--icon", ico,
+           "--specpath", work, "--paths", server, "--paths", ROOT, "--paths", work, "--icon", ico,
+           "--hidden-import", DEFAULTS_MODULE,
            "--collect-submodules", "fsspec",
            "--hidden-import", "certifi", "--collect-data", "certifi",   # CA bundle fallback (launcher.ensure_ca_certs)
            "--add-data", f"{os.path.join(ROOT, 'mod', 'beamng_earth')}{SEP}mod/beamng_earth",
@@ -192,11 +210,26 @@ def main():
                     help="Windows: PyInstaller's prebuilt bootloader even when tools/build_bootloader.py made one")
     ap.add_argument("--require-own-bootloader", action="store_true",
                     help="Windows: stop when tools/build_bootloader.py has not made one (CI)")
+    ap.add_argument("--server-arg", action="append", default=[], metavar="OPT",
+                    help="bake an option for the world server into this build, as if typed after '--' "
+                         "(repeatable; the player's own options still win). Nothing is baked by default")
+    ap.add_argument("--set-env", action="append", default=[], metavar="NAME=VALUE",
+                    help="bake an environment setting into this build (repeatable); it is applied only "
+                         "where the player has not set that name themselves")
     a = ap.parse_args()
     work = os.path.join(ROOT, "build", "app")
     shutil.rmtree(work, ignore_errors=True)
     os.makedirs(work, exist_ok=True)
     os.makedirs(a.out, exist_ok=True)
+    env = {}
+    for kv in a.set_env:
+        k, _, v = kv.partition("=")
+        if not k or not _:
+            ap.error("--set-env takes NAME=VALUE, not %r" % kv)
+        env[k] = v
+    write_defaults(work, a.server_arg, env)
+    if a.server_arg or env:
+        print("baked into this build: %s %s" % (" ".join(a.server_arg), " ".join("%s=%s" % kv for kv in env.items())))
     png, ico = make_icons(work)
     ver = version()
     if IS_WIN:

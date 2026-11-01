@@ -46,6 +46,19 @@ GCPATCH_NAME = "libbngearth_gcpatch.so"
 RECOMMENDED = ["--deshadow", "full", "--near-visual", "detail", "--airports", "on", "--sea", "on", "--trees", "on",
                "--buildings", "on", "--gas-stations", "on"]
 SERVER_PORT = 47613         # earthd's default
+
+
+def bundled_defaults():
+    """(server options, environment) baked into this build by tools/build_app.py --server-arg / --set-env.
+
+    A plain build bakes nothing, so this is ([], {}) and the launcher behaves exactly as before. A build made
+    for one machine can carry its tuning instead of needing a .bat beside the executable to set it: the point
+    is that double-clicking the executable is the whole of the launch."""
+    try:
+        import bngearth_build_defaults as d
+    except Exception:
+        return [], {}
+    return list(getattr(d, "SERVER_ARGS", ()) or ()), dict(getattr(d, "ENV", {}) or {})
 GAME_GONE_S = 30            # no game process this long: the game closed (wait_for_game)
 GAME_START_S = 180          # waiting for the game's process after asking Steam
 DIRECT_FAIL_S = 20          # a direct start that ends this soon did not work (no Steam client): through Steam
@@ -1094,6 +1107,12 @@ def run(args):
             windows_game_dir() if IS_WIN else linux_game_exe()):
         ask_game_dir()
     extra = args.extra[1:] if args.extra[:1] == ["--"] else args.extra
+    baked, baked_env = bundled_defaults()
+    for _k, _v in baked_env.items():
+        os.environ.setdefault(_k, _v)       # never over the player's own setting
+    if baked:
+        extra = baked + extra               # before the player's own, which earthd then takes instead
+        row("Built-in options", " ".join(baked))
     if "--cache-dir" not in extra:
         try:
             cache = cache_dir_arg(args.cache_dir)
