@@ -6,10 +6,21 @@ Copie privée de **[TecnaGamer/BeamNG.Earth](https://github.com/TecnaGamer/BeamN
 
 > GitHub affiche ce fichier à la place de `README.md`, qui est resté celui du projet d'origine.
 
-## L'exécutable prêt à l'emploi
+## ⬇ Télécharger le jeu
 
-Il n'est **pas** dans l'historique Git : un binaire de 53 Mo y resterait pour toujours et dépasse le seuil
-de GitHub. Il est publié en **[Release](../../releases)**, avec les deux lanceurs et la notice.
+### **[BeamNG.Earth-1.6.3-beta-bdtopo.exe](https://github.com/KaBcrAST/BeamNG.Earth-bdtopo/releases/download/v1.6.3-beta-bdtopo/BeamNG.Earth-1.6.3-beta-bdtopo.exe)** (53 Mo)
+
+Téléchargez-le et **double-cliquez-le**. C'est tout : les réglages sont gravés dedans, il n'y a pas de
+`.bat` à lancer. La [page de la release](../../releases/tag/v1.6.3-beta-bdtopo) porte aussi la notice et
+l'empreinte SHA-256.
+
+> **Vous ne le trouvez pas dans la liste des fichiers ci-dessus ?** C'est normal : un binaire de 53 Mo n'a
+> rien à faire dans un historique Git, où il resterait pour toujours. Il vit dans les **Releases**, colonne
+> de droite.
+>
+> Attention à ne pas prendre la release `v1.6.3-beta` : elle a été publiée automatiquement par le workflow
+> du projet quand le tag de l'amont a été poussé, et son exécutable est le build **d'origine**, sans aucun
+> des travaux sur la France.
 
 Pour le reconstruire depuis les sources :
 
