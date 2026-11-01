@@ -874,13 +874,17 @@ def _plain_wall_with_windows(m, spec, a, b, L, z0, z_eave, wallmat, mat_idx, edg
                    (u0, v0), (u1, v0), (u1, v1), (u0, v1), win)
 
 
-def _walls(m, spec, ring, z0, z_eave, mat_idx, lite=False):
-    """Each wall of the ring, floor by floor: one band of the window sheet, a whole number of bays."""
+def _walls(m, spec, ring, z0, z_eave, mat_idx, lite=False, skip=()):
+    """Each wall of the ring, floor by floor: one band of the window sheet, a whole number of bays.
+
+    skip: edge indices a neighbouring building stands against and hides (_party_edges)."""
     n = len(ring)
     fac = mat_idx[spec.facade]
     pts = np.asarray(ring, np.float64)[:, :2].tolist()     # (plain floats: the arithmetic below, per bay)
     reveal = reveals()                                     # once per wall: the bay loop below is a tile's hot path
     for i in range(n):
+        if i in skip:                                      # a party wall: the neighbour hides all of it
+            continue
         a, b = ring[i], ring[(i + 1) % n]
         L = float(math.hypot(*(b - a)))
         if L < 0.05:
@@ -1093,13 +1097,17 @@ def _plain_strip(m, pa, pb, za, zb, bays_per_tile, bay_w, v0, v1, mat, whole=Fal
         m.quad((qax, qay, za), (qbx, qby, za), (qbx, qby, zb), (qax, qay, zb), uva, uvb, uvc, uvd, mat)
 
 
-def _cornice(m, spec, ring, z_eave, mat_idx):
-    """A box moulding round a flat roof's edge (row houses' cornices, parapets), the plain white plaster."""
+def _cornice(m, spec, ring, z_eave, mat_idx, skip=()):
+    """A box moulding round a flat roof's edge (row houses' cornices, parapets), the plain white plaster.
+
+    skip: the party edges (_party_edges). A cornice there stands inside the neighbour, seen by nobody."""
     mat = mat_idx["bne_bld_fac_white"]
     o, z0, z1 = CORNICE_OUT_M, z_eave - CORNICE_DOWN_M, z_eave + CORNICE_UP_M
     uv = ((0.002, 0.995), (0.012, 0.995), (0.012, 0.999), (0.002, 0.999))
     n = len(ring)
     for i in range(n):
+        if i in skip:
+            continue
         a, b = ring[i], ring[(i + 1) % n]
         e = b - a
         L = float(math.hypot(*e))
@@ -1683,25 +1691,35 @@ def build(specs_and_ground, lite=False):
     (positions, uvs, tris, tri material indices, MATERIALS) or None if empty. lite (far tiles): no
     cornices, whole walls instead of one quad per bay."""
     m = Mesh()
+    # the party walls first, on the rings as they will be drawn: a wall a neighbour of the same height
+    # stands against is drawn by both of them and seen by nobody (_party_edges)
+    drawn, eaves = [], []
     for spec, gmin, gmax in specs_and_ground:
+        if spec.cls == "toll_booth" or spec.cls in BRIDGE_CLASSES or (spec.deck and not lite):
+            drawn.append(np.zeros((0, 2))), eaves.append(None)
+            continue
+        drawn.append(drawn_ring(spec))
+        eaves.append(base_z(spec, gmin, gmax) + (spec.min_h or 0.0) + spec.height)
+    party = _party_edges(drawn, eaves)
+    for k, (spec, gmin, gmax) in enumerate(specs_and_ground):
         if spec.cls == "toll_booth":        # a stock prop (toll_booth_rows)
             continue
         mat_idx = _Looks(spec.seed)
         if spec.cls in BRIDGE_CLASSES:
             _steel_frame(m, spec, gmin, mat_idx[spec.facade if spec.facade in LOOKS else STEEL], lite)
             continue
-        ring = drawn_ring(spec)
+        ring = drawn[k] if len(drawn[k]) else drawn_ring(spec)
         mh = spec.min_h or 0.0
         if spec.deck and not lite and _parking_deck(m, spec, gmin, gmax, mat_idx):
             continue
         z0 = gmin - (SKIRT_LITE_M if lite else SKIRT_M) if mh <= 0.5 else base_z(spec, gmin, gmax) + mh
         z_eave = base_z(spec, gmin, gmax) + mh + spec.height
-        _walls(m, spec, ring, z0, z_eave, mat_idx, lite)
+        _walls(m, spec, ring, z0, z_eave, mat_idx, lite, party[k])
         if mh > 0.5:                                  # a part standing on another / over a street: its underside
             m.poly([(p[0], p[1], z0) for p in ring[::-1]], [(0.002, 0.995)] * len(ring), mat_idx[spec.facade])
         _roof(m, spec, ring, z_eave, mat_idx)
         if spec.roof == "flat" and not spec.plain and spec.floors <= 6 and not lite:
-            _cornice(m, spec, ring, z_eave, mat_idx)
+            _cornice(m, spec, ring, z_eave, mat_idx, party[k])
         if not lite:
             _clutter(m, spec, ring, z_eave, mat_idx)
         if spec.steeple:
@@ -1796,6 +1814,77 @@ def collision_mesh(specs_and_ground):
 
 
 # ------------------------------------------------------------------------------------------- a tile
+
+# A party wall: the wall two buildings of a row hold in common. Both of them draw it, and neither can be
+# seen -- there is no gap between the two to see it through -- so both are wasted, and with a window set
+# back into each bay (_bay_reveal) they are wasted nine quads at a time. Over a Bailleul cell, 28 % of all
+# wall length is laid against another building's wall (2026-11-01, measured on the drawn rings).
+PARTY_TOL_M = 0.5           # m: how close two walls must lie to be the same wall
+PARTY_COVER = 0.92          # the share of an edge the neighbour must cover before it is dropped at all
+PARTY_LOWER_M = 0.10        # m the neighbour may fall short of our eaves and still hide the whole wall
+PARTY_GRID_M = 4.0
+
+
+def _party_edges(rings, eaves):
+    """Per ring, the set of edge indices that another ring covers and another building hides.
+
+    An edge is dropped only when a neighbour's edge runs along nearly all of it (PARTY_COVER) within
+    PARTY_TOL_M, and that neighbour's eaves stand at least as high: a taller house beside a lower one still
+    shows the wall above its neighbour's roof, and that one is kept whole rather than cut."""
+    n = len(rings)
+    out = [frozenset() for _ in range(n)]
+    if n < 2:
+        return out
+    edges = []                                      # (ring, edge, A, B, length, unit direction)
+    for bi, r in enumerate(rings):
+        q = np.asarray(r, np.float64)[:, :2]
+        for j in range(len(q)):
+            a, b = q[j], q[(j + 1) % len(q)]
+            L = float(math.hypot(b[0] - a[0], b[1] - a[1]))
+            if L > 0.05:
+                edges.append((bi, j, a, b, L, (b - a) / L))
+    if not edges:
+        return out
+    grid = {}
+    for idx, (_bi, _j, a, b, L, _d) in enumerate(edges):
+        steps = max(2, int(L / (PARTY_GRID_M * 0.5)) + 1)
+        for t in np.linspace(0.0, 1.0, steps):
+            p = a + (b - a) * t
+            grid.setdefault((int(p[0] // PARTY_GRID_M), int(p[1] // PARTY_GRID_M)), []).append(idx)
+    found = [set() for _ in range(n)]
+    for idx, (bi, j, a, b, L, d) in enumerate(edges):
+        if eaves[bi] is None:
+            continue
+        mid = (a + b) * 0.5
+        cand = set()
+        gx, gy = int(mid[0] // PARTY_GRID_M), int(mid[1] // PARTY_GRID_M)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                cand.update(grid.get((gx + dx, gy + dy), ()))
+        for k in cand:
+            bj, _j2, c, _dd, L2, d2 = edges[k]
+            if bj == bi or eaves[bj] is None or eaves[bj] < eaves[bi] - PARTY_LOWER_M:
+                continue
+            if abs(float(d[0] * d2[0] + d[1] * d2[1])) < 0.985:         # not the same line
+                continue
+            # our edge's ends projected on theirs, and the perpendicular distance of both
+            ok = True
+            lo = hi = None
+            for pt in (a, b):
+                w = pt - c
+                t = float(w[0] * d2[0] + w[1] * d2[1])
+                if float(math.hypot(*(c + d2 * t - pt))) > PARTY_TOL_M:
+                    ok = False
+                    break
+                lo = t if lo is None else min(lo, t)
+                hi = t if hi is None else max(hi, t)
+            if not ok:
+                continue
+            if min(hi, L2) - max(lo, 0.0) >= PARTY_COVER * L:           # they cover nearly all of it
+                found[bi].add(j)
+                break
+    return [frozenset(x) for x in found]
+
 
 def _shared_walls(rings, tol=0.6):
     """Per ring, the number of other rings with a vertex within tol of one of its edges (row houses)."""

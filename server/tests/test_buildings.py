@@ -1090,3 +1090,73 @@ class RevealTest(unittest.TestCase):
         """The other bands' openings are not measured yet, and a guessed one would cut their frames."""
         self.assertEqual(set(bld.BAND_OPENING), {3})
         self.assertEqual(bld.BAND_BRICK[0], 3)
+
+
+class PartyWallTest(unittest.TestCase):
+    """_party_edges: the wall two buildings of a row hold in common is drawn by both and seen by nobody.
+
+    Over a Bailleul cell 28 % of all wall length lies against another building's wall; dropping the ones a
+    neighbour of the same height hides takes 10.7 % off the near mesh and 8.0 % off the lite one, and the
+    build gets faster rather than slower. The danger is dropping a wall that CAN be seen, so each rule that
+    holds one back is pinned here.
+    """
+
+    @staticmethod
+    def box(x0, y0, w, d):
+        return np.array([(x0, y0), (x0 + w, y0), (x0 + w, y0 + d), (x0, y0 + d)], np.float64)
+
+    def test_a_terrace_drops_the_wall_the_two_share(self):
+        left, right = self.box(0, 0, 6, 12), self.box(6, 0, 6, 12)
+        out = bld._party_edges([left, right], [9.0, 9.0])
+        self.assertEqual(out[0], frozenset({1}), "the left house's east wall")
+        self.assertEqual(out[1], frozenset({3}), "the right house's west wall")
+
+    def test_the_taller_neighbour_keeps_its_wall(self):
+        """A house beside a lower one still shows the wall above its neighbour's roof."""
+        low, tall = self.box(0, 0, 6, 12), self.box(6, 0, 6, 12)
+        out = bld._party_edges([low, tall], [6.0, 12.0])
+        self.assertEqual(out[0], frozenset({1}), "the low one is hidden by the tall one")
+        self.assertEqual(out[1], frozenset(), "the tall one is not hidden by the low one")
+
+    def test_a_neighbour_barely_lower_still_hides_it(self):
+        a, b = self.box(0, 0, 6, 12), self.box(6, 0, 6, 12)
+        self.assertEqual(bld._party_edges([a, b], [9.0, 9.0 - bld.PARTY_LOWER_M / 2])[0], frozenset({1}))
+        self.assertEqual(bld._party_edges([a, b], [9.0, 9.0 - 1.0])[0], frozenset(), "a metre lower shows")
+
+    def test_buildings_that_only_touch_at_a_corner_keep_everything(self):
+        a, b = self.box(0, 0, 6, 6), self.box(6, 6, 6, 6)
+        out = bld._party_edges([a, b], [9.0, 9.0])
+        self.assertEqual((out[0], out[1]), (frozenset(), frozenset()))
+
+    def test_a_neighbour_covering_only_part_of_a_wall_does_not_hide_it(self):
+        """Half a wall behind a neighbour is half a wall in the open: it is kept whole rather than cut."""
+        long_one, short_one = self.box(0, 0, 6, 12), self.box(6, 0, 6, 5)
+        out = bld._party_edges([long_one, short_one], [9.0, 9.0])
+        self.assertEqual(out[0], frozenset(), "5 m of a 12 m wall is not enough")
+        self.assertEqual(out[1], frozenset({3}), "but the short one is wholly covered")
+
+    def test_a_wall_across_a_gap_is_kept(self):
+        a, b = self.box(0, 0, 6, 12), self.box(6 + 3 * bld.PARTY_TOL_M, 0, 6, 12)
+        out = bld._party_edges([a, b], [9.0, 9.0])
+        self.assertEqual((out[0], out[1]), (frozenset(), frozenset()), "a gap you can see into")
+
+    def test_a_building_on_its_own_keeps_every_wall(self):
+        self.assertEqual(bld._party_edges([self.box(0, 0, 6, 12)], [9.0]), [frozenset()])
+        self.assertEqual(bld._party_edges([], []), [])
+
+    def test_a_dropped_wall_leaves_the_outside_closed(self):
+        """Both houses of a pair drop the wall between them; what is left must still enclose the row, so no
+        triangle of either may face into the strip the two walls stood on."""
+        specs = []
+        for x in (0.0, 6.0):
+            ring = self.box(x, 0, 6, 12)
+            specs.append((bld.plan(ring, {"class": "house", "height": 9.0, "roof_shape": "flat"},
+                                   neighbours=1, lat=50.73, lon=2.735), 0.0, 0.0))
+        P, _UV, T, _M, _mats, _C = bld.build(specs)
+        mid = P[T].mean(1)
+        on_seam = np.abs(mid[:, 0] - 6.0) < 0.05
+        self.assertEqual(int(on_seam.sum()), 0, "nothing is drawn on the seam any more")
+        self.assertGreater(len(T), 0)
+        self.assertLess(P[:, 0].min(), 0.01)
+        self.assertGreater(P[:, 0].max(), 11.99, "and the pair still reaches both its outer faces")
+
