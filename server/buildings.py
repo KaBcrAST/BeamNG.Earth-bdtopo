@@ -77,8 +77,16 @@ BARN_CLASSES = {"barn", "farm_auxiliary", "stable", "cowshed"}
 # looks plan() picks, each one of these with a colour (LOOKS).
 MARBLE = "bne_bld_marble"   # cut white marble (the stock m_marble_cut): Baltimore's row house steps
 BRICK_WALL = "bne_bld_brick"    # plain red brick (the stock brick_plain): a garage's skin
+# The masonry a near brick wall is really drawn in, once its windows are set back out of the sheet
+# (_bay_reveal): Poly Haven's brick_wall_09, CC0, 1 k, laid at the 2.01 m the texture covers, which is
+# about 26 courses and so real brick sizes. The sheet's own band stays on the lite mesh and on the far
+# tiles, and there is no step between them: measured, the sheet's brick averages RGB (157, 129, 119) and
+# this one (160, 132, 113), a ratio of 0.98/0.98/1.06. What it buys is detail, 509 px of wall per metre
+# against the band's 85, and twice the variation between bricks (luma std 16.1 against 8.3).
+BRICKFACE = "bne_bld_brickface"
+BRICKFACE_UV_M = 2.01       # m per repeat: the real size Poly Haven gives for the texture
 CONCRETE = "bne_bridge_concrete"  # plain concrete (tunnel.materials.json): a precast garage's skin
-MATERIALS = (FACADE, SHOP, OFFICE, ROOF_FLAT, ROOF_SLATE, ROOF_SHINGLE, SIDING, STUCCO, ROOF_METAL, PANEL, METALWALL,
+MATERIALS = (BRICKFACE, FACADE, SHOP, OFFICE, ROOF_FLAT, ROOF_SLATE, ROOF_SHINGLE, SIDING, STUCCO, ROOF_METAL, PANEL, METALWALL,
              STONE, MARBLE, BRICK_WALL, CONCRETE)
 LOOKS = {
     "bne_bridge_steel": (METALWALL, (0.50, 0.52, 0.54)),
@@ -96,6 +104,11 @@ LOOKS = {
     "bne_bld_fac_rose": (FACADE, (0.99, 0.86, 0.82)), "bne_bld_fac_yellow": (FACADE, (1.0, 0.95, 0.72)),
     SHOP: (SHOP, (1.0, 1.0, 1.0)), OFFICE: (OFFICE, (1.0, 1.0, 1.0)), SIDING: (SIDING, (0.93, 0.92, 0.88)),
 }
+# Each brick tint gets a twin on the real masonry (BRICKFACE), the same colour: a building keeps the tint it
+# was given whichever of the two its wall is drawn in, so the near wall and the far band never disagree.
+FACE_SUFFIX = "|face"
+for _t in BRICK_TINTS:
+    LOOKS[_t + FACE_SUFFIX] = (BRICKFACE, LOOKS[_t][1])
 ROOF_TINTS = {               # per roof material: the colours a building's roof takes (hashed)
     ROOF_FLAT: ((0.85, 0.85, 0.85), (0.62, 0.62, 0.64), (0.95, 0.93, 0.88), (0.45, 0.45, 0.46), (0.75, 0.70, 0.64)),
     # 4..: clay tiles (terracotta, red-brown, faded orange) and dark grey / anthracite / brown-black (regional)
@@ -906,6 +919,9 @@ def _walls(m, spec, ring, z0, z_eave, mat_idx, lite=False):
                 mat, band_k, uu = fac, spec.band[0], u1
                 if len(spec.band) > 2 and nb >= 1 and not lite:     # the good bays only, one quad each
                     v0, v1 = _band_v(spec.band, band_k)
+                    # the masonry twin of this building's tint, when the sheet's band has one (brick)
+                    face_look = spec.facade + FACE_SUFFIX
+                    face_mat = mat_idx[face_look] if face_look in LOOKS else None
                     good = spec.band[2]
                     dk = None
                     if f == 0 and spec.door and spec.door[0] == i and spec.roof == "flat":
@@ -921,9 +937,11 @@ def _walls(m, spec, ring, z0, z_eave, mat_idx, lite=False):
                         bu0, bu1 = g / bays_per_tile, (g + 1) / bays_per_tile
                         opening = BAND_OPENING.get(band_k) if reveal else None
                         if opening is not None and L / nb >= REVEAL_MIN_BAY_M:
-                            # the window set back into the wall (lite meshes never reach here: the far tiles
-                            # and a near tile's distant detail keep the flat band)
-                            _bay_reveal(m, pa, pb, za, zb, bu0, bu1, v0, v1, opening, mat)
+                            # the window set back into the wall, its masonry drawn in real brick where there
+                            # is one for this facade (lite meshes never reach here: the far tiles and a near
+                            # tile's distant detail keep the flat band, and the two match in colour)
+                            _bay_reveal(m, pa, pb, za, zb, bu0, bu1, v0, v1, opening, mat,
+                                        face=face_mat, u_m=L * k / nb)
                             continue
                         m.quad((pa[0], pa[1], za), (pb[0], pb[1], za), (pb[0], pb[1], zb), (pa[0], pa[1], zb),
                                (bu0, v0), (bu1, v0), (bu1, v1), (bu0, v1), mat)
@@ -974,12 +992,16 @@ def reveals():
     return os.environ.get("BNE_REVEAL", "on").strip().lower() not in ("0", "off", "no", "false")
 
 
-def _bay_reveal(m, pa, pb, za, zb, bu0, bu1, v0, v1, opening, mat, depth=REVEAL_M):
+def _bay_reveal(m, pa, pb, za, zb, bu0, bu1, v0, v1, opening, mat, depth=REVEAL_M, face=None, u_m=0.0):
     """One bay with its window set back into the wall: the four pieces of wall around the opening, the four
     returns of the reveal, and the pane itself at `depth` behind the face.
 
     pa, pb: the bay's ends along the wall (the ring is counter-clockwise, so (dy, -dx) points out of it);
-    bu0, bu1 / v0, v1: the bay's rectangle on the sheet; opening: (u0, u1, v0, v1) within the bay."""
+    bu0, bu1 / v0, v1: the bay's rectangle on the sheet; opening: (u0, u1, v0, v1) within the bay.
+
+    face: the masonry to draw the wall and the returns in instead of the sheet (BRICKFACE), laid at its own
+    real size; u_m is then how far this bay starts along the wall, so the courses run on across the bays
+    rather than restarting at each. The pane always keeps the sheet: the window is the sheet's own."""
     ou0, ou1, ov0, ov1 = opening
     (ax, ay), (bx, by) = pa, pb
     dx, dy = bx - ax, by - ay
@@ -988,7 +1010,7 @@ def _bay_reveal(m, pa, pb, za, zb, bu0, bu1, v0, v1, opening, mat, depth=REVEAL_
         return
     inx, iny = -dy / L * depth, dx / L * depth      # into the building, by the reveal's depth
 
-    def face(t, z, back=False):                     # a point at fraction t along the bay, height z
+    def at(t, z, back=False):                       # a point at fraction t along the bay, height z
         x, y = ax + dx * t, ay + dy * t
         return (x + inx, y + iny, z) if back else (x, y, z)
 
@@ -996,6 +1018,14 @@ def _bay_reveal(m, pa, pb, za, zb, bu0, bu1, v0, v1, opening, mat, depth=REVEAL_
         return (bu0 + (bu1 - bu0) * t, v0 + (v1 - v0) * f)
 
     zh = zb - za
+
+    if face is not None:                            # the masonry at its own scale, continuous along the wall
+        wall_mat = face
+
+        def wuv(t, f):
+            return ((u_m + L * t) / BRICKFACE_UV_M, (za + zh * f) / BRICKFACE_UV_M)
+    else:
+        wall_mat, wuv = mat, uv
 
     def z_at(f):
         return za + zh * f
@@ -1006,20 +1036,36 @@ def _bay_reveal(m, pa, pb, za, zb, bu0, bu1, v0, v1, opening, mat, depth=REVEAL_
                            (0.0, ou0, ov0, ov1), (ou1, 1.0, ov0, ov1)):
         if t1 - t0 < 1e-4 or f1 - f0 < 1e-4:
             continue
-        m.quad(face(t0, z_at(f0)), face(t1, z_at(f0)), face(t1, z_at(f1)), face(t0, z_at(f1)),
-               uv(t0, f0), uv(t1, f0), uv(t1, f1), uv(t0, f1), mat)
+        m.quad(at(t0, z_at(f0)), at(t1, z_at(f0)), at(t1, z_at(f1)), at(t0, z_at(f1)),
+               wuv(t0, f0), wuv(t1, f0), wuv(t1, f1), wuv(t0, f1), wall_mat)
     # the pane, set back; it keeps the sheet's own window so the glass and its frame still line up
-    m.quad(face(ou0, zo0, True), face(ou1, zo0, True), face(ou1, zo1, True), face(ou0, zo1, True),
+    m.quad(at(ou0, zo0, True), at(ou1, zo0, True), at(ou1, zo1, True), at(ou0, zo1, True),
            uv(ou0, ov0), uv(ou1, ov0), uv(ou1, ov1), uv(ou0, ov1), mat)
-    # the four returns, each taking a sliver of the wall beside it so they read as the same masonry
+    # the four returns of the reveal, in the same masonry as the wall. On the sheet they take a sliver of
+    # the wall beside the opening; on real masonry they take the courses that run into the opening, which
+    # is what a brick return is.
+    if face is not None:
+        d_uv = depth / BRICKFACE_UV_M
+
+        def ruv(t, z, into):                        # the wall's own point, carried `into` the reveal
+            return ((u_m + L * t) / BRICKFACE_UV_M + into, z / BRICKFACE_UV_M)
+        m.quad(at(ou0, zo0), at(ou1, zo0), at(ou1, zo0, True), at(ou0, zo0, True),
+               ruv(ou0, zo0, 0), ruv(ou1, zo0, 0), ruv(ou1, zo0, d_uv), ruv(ou0, zo0, d_uv), wall_mat)
+        m.quad(at(ou1, zo1), at(ou0, zo1), at(ou0, zo1, True), at(ou1, zo1, True),
+               ruv(ou1, zo1, 0), ruv(ou0, zo1, 0), ruv(ou0, zo1, d_uv), ruv(ou1, zo1, d_uv), wall_mat)
+        m.quad(at(ou0, zo1), at(ou0, zo0), at(ou0, zo0, True), at(ou0, zo1, True),
+               ruv(ou0, zo1, 0), ruv(ou0, zo0, 0), ruv(ou0, zo0, d_uv), ruv(ou0, zo1, d_uv), wall_mat)
+        m.quad(at(ou1, zo0), at(ou1, zo1), at(ou1, zo1, True), at(ou1, zo0, True),
+               ruv(ou1, zo0, 0), ruv(ou1, zo1, 0), ruv(ou1, zo1, d_uv), ruv(ou1, zo0, d_uv), wall_mat)
+        return
     su = uv(max(0.0, ou0 - 0.03), ov0)[0], uv(ou0, ov0)[0]
-    m.quad(face(ou0, zo0), face(ou1, zo0), face(ou1, zo0, True), face(ou0, zo0, True),
+    m.quad(at(ou0, zo0), at(ou1, zo0), at(ou1, zo0, True), at(ou0, zo0, True),
            (su[0], v0), (su[1], v0), (su[1], v0), (su[0], v0), mat)                      # sill, facing up
-    m.quad(face(ou1, zo1), face(ou0, zo1), face(ou0, zo1, True), face(ou1, zo1, True),
+    m.quad(at(ou1, zo1), at(ou0, zo1), at(ou0, zo1, True), at(ou1, zo1, True),
            (su[0], v1), (su[1], v1), (su[1], v1), (su[0], v1), mat)                      # head, facing down
-    m.quad(face(ou0, zo1), face(ou0, zo0), face(ou0, zo0, True), face(ou0, zo1, True),
+    m.quad(at(ou0, zo1), at(ou0, zo0), at(ou0, zo0, True), at(ou0, zo1, True),
            (su[0], v1), (su[0], v0), (su[1], v0), (su[1], v1), mat)                      # jamb, left
-    m.quad(face(ou1, zo0), face(ou1, zo1), face(ou1, zo1, True), face(ou1, zo0, True),
+    m.quad(at(ou1, zo0), at(ou1, zo1), at(ou1, zo1, True), at(ou1, zo0, True),
            (su[0], v0), (su[0], v1), (su[1], v1), (su[1], v0), mat)                      # jamb, right
 
 
