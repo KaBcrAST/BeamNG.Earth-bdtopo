@@ -70,6 +70,7 @@ import overture
 import rangeread
 import revisit
 import roofs
+import shops
 import staging
 import xproc
 
@@ -93,7 +94,8 @@ VERSION = 2                     # pipeline version: bump when what a cell's laye
 # buildings 1: IGN BD TOPO heights joined in over France (bdtopo.py); the cached cells guessed them
 # buildings 2: the BD TOPO use and materials too (facade_material, roof_material, class)
 # buildings 3: roof shapes from the IGN LiDAR HD height model over France (roofs.py)
-LAYER_VERSIONS = {"roads": 6, "buildings": 4}
+LAYER_VERSIONS = {"roads": 6, "buildings": 5}
+                                # (5: the cell's own shops put on the buildings that hold them, shops.py)
                                 # (4: the LiDAR roofs' ridge direction and roof height, which the mesh
                                 # builder now lays the ridge and the pitch from)
                                 # (2: clipped polygon pieces `own`ed by their cell, exact cell edges,
@@ -353,6 +355,8 @@ class MapData:
             prov2 = self._bdtopo(key, layer, feats, kind)
             # and the roof shapes from the IGN's LiDAR, which nothing else has (roofs.py)
             prov3 = self._roofs(key, layer, feats, kind)
+            # the shops the cell's own places layer already knows, on the buildings that hold them
+            self._shops(key, layer, feats, kind)
             ox, oy = mapcells.owner(feats.attrs.get("cx", np.zeros(0)), feats.attrs.get("cy", np.zeros(0)), key.z)
             feats.own = (ox == key.x) & (oy == key.y)
             if feats.clipped is not None:
@@ -403,6 +407,26 @@ class MapData:
         except Exception as e:          # optional: the roads go on with their guesses
             log.warning("mapdata: OSM road tags of %s: %s: %s", key, type(e).__name__, e)
             return {}, []
+
+    def _shops(self, key, layer, feats, kind):
+        """Put the cell's shops on the buildings that hold them (shops.py).
+
+        The places layer is this cell's own and is already downloaded for every cell; it was read by
+        gasstations.py alone. No provenance of its own: the shops come from the same Overture release as
+        the buildings, which the layer already names."""
+        if layer != "buildings" or not len(feats):
+            return
+        try:
+            places = self.cell(key, layers=("places",), kind=kind).layers.get("places")
+        except DEFERRED:
+            raise
+        except Exception as e:
+            log.warning("mapdata: shops of %s: %s: %s; the shopfronts keep buildings.plan()'s guesses",
+                        key, type(e).__name__, e)
+            return
+        named, lost = shops.join(feats, [places])
+        if named:
+            log.info("mapdata: %d shops on the buildings of %s (%d places found no building)", named, key, lost)
 
     def _bdtopo(self, key, layer, feats, kind):
         """Join the IGN BD TOPO heights into the cell's buildings over France (bdtopo.py); the provenance record

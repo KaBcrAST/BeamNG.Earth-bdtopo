@@ -176,6 +176,31 @@ SIGN_TINTS = ((0.62, 0.16, 0.14), (0.16, 0.22, 0.42), (0.18, 0.36, 0.24), (0.95,
               (0.85, 0.65, 0.20), (0.13, 0.13, 0.14), (0.96, 0.96, 0.96), (0.15, 0.45, 0.48))
 for _k, _c in enumerate(SIGN_TINTS):
     LOOKS[f"sign|{_k}"] = (FACADE, _c)
+# A shopfront's own colours, by the trade the places layer names (shops.KINDS). The board over the window
+# and the awning under it take the same one: a French high street is read trade by trade, and a baker's
+# yellow-cream awning is not a pharmacy's green or a bank's navy. Before this the board took one of six
+# tints by a hash and the awning did not exist at all.
+SHOP_COLOURS = {
+    "bakery": ((0.86, 0.68, 0.30), (0.95, 0.86, 0.62)),     # (board, awning)
+    "food": ((0.72, 0.24, 0.20), (0.86, 0.40, 0.30)),
+    "restaurant": ((0.55, 0.16, 0.16), (0.80, 0.30, 0.26)),
+    "bar": ((0.36, 0.22, 0.14), (0.62, 0.42, 0.26)),
+    "pharmacy": ((0.14, 0.52, 0.32), (0.36, 0.70, 0.46)),   # the green cross of a French pharmacy
+    "beauty": ((0.52, 0.26, 0.46), (0.78, 0.52, 0.70)),
+    "fashion": ((0.18, 0.18, 0.20), (0.45, 0.45, 0.48)),
+    "bank": ((0.14, 0.22, 0.44), (0.30, 0.40, 0.62)),
+    "hotel": ((0.30, 0.26, 0.52), (0.52, 0.48, 0.72)),
+    "automotive": ((0.20, 0.34, 0.52), (0.42, 0.56, 0.72)),
+    "hardware": ((0.30, 0.40, 0.26), (0.52, 0.62, 0.44)),
+    "shop": ((0.40, 0.30, 0.34), (0.66, 0.54, 0.56)),
+}
+AWNING_OUT_M = 1.1          # m the awning reaches over the pavement
+AWNING_DROP_M = 0.45        # m it falls over that reach
+AWNING_Z = 0.35             # m under the sign band's bottom
+AWNING_MIN_L = 2.5          # m of wall: a shorter front gets no awning
+for _k, (_b, _a) in SHOP_COLOURS.items():       # the board and the awning as looks of their own
+    LOOKS[f"shopboard|{_k}"] = (PANEL, _b)
+    LOOKS[f"awning|{_k}"] = (PANEL, _a)
 SIGN_H = 0.9                # m, the band's height (its top 0.15 m under the ground floor's top)
 SIGN_OUT = 0.18             # m out from the wall
 SIGN_SHOP_M = (6.0, 11.0)   # one shop's width (hashed in this range)
@@ -384,7 +409,7 @@ def oriented_box(p):
 class Spec:
     """What is built for one footprint (decided by plan())."""
     __slots__ = ("ring", "floors", "floor_h", "height", "roof", "roof_mat", "facade", "band", "shop", "plain", "min_h", "wall", "door", "windows", "front", "steeple", "stoop",
-                 "sign", "porch", "cls", "seed", "deck", "pitch", "portal", "gring", "ridge_across", "roof_h")
+                 "sign", "porch", "cls", "seed", "deck", "pitch", "portal", "gring", "ridge_across", "roof_h", "trade")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -579,6 +604,11 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
     _, box_u, hl, hw = oriented_box(ring)
     box_fill = area / max(4 * hl * hw, 1e-6)
     cls = (attrs.get("class") or "").lower()
+    # the trade the cell's own places layer puts here (shops.py), which beats guessing one from the class:
+    # over a Bailleul cell the class made 42 shopfronts of 1903 facades, the places layer names 74 shops
+    trade = str(attrs.get("shop_kind") or "").strip().lower() or None
+    if trade not in SHOP_COLOURS:
+        trade = "shop" if trade else None
     name = str(attrs.get("name") or "").lower()
     terminal = any(w in name for w in ("terminal", "concourse"))
     church = cls in CHURCH_CLASSES or any(w in name for w in ("church", "chapel", "cathedral"))
@@ -593,7 +623,7 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
     row = cls in ROW_CLASSES or (not west_town and ((narrow and (neighbours >= 1 or dense)) or (
         dense and area < 260 and cls not in SHOP_CLASSES)))
     shed = (cls in SHED_CLASSES and not garage) or (area < 40 and not row)
-    shop = cls in SHOP_CLASSES
+    shop = cls in SHOP_CLASSES or trade is not None
     industrial = cls in INDUSTRIAL_CLASSES or (area > 2500 and cls in ("", "commercial"))
     industrial = industrial and not (garage or terminal)
 
@@ -863,7 +893,7 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
                 band=band, shop=shop and not shed and nf >= 1, plain=plain, seed=seed, min_h=0.0, wall=wall,
                 windows=windows, steeple=church and area < 2500, porch=porch, cls=cls,
                 deck=garage and roof == "flat", pitch=style.pitch, ridge_across=across,
-                roof_h=_roof_h(attrs, roof))
+                roof_h=_roof_h(attrs, roof), trade=trade)
 
 
 class Mesh:
@@ -1252,6 +1282,39 @@ def _box(m, c, u, hx, hy, z0, z1, mat):
     m.quad(*[(p[0], p[1], z1) for p in k], *uv, mat)
 
 
+def _awning(m, spec, ring, z_top, mat_idx):
+    """The awning over a shop's pavement: a sloping sheet off the street wall, with its two ends closed.
+
+    Only where the places layer named a trade (spec.trade), so it is the shop's own colour and never an
+    invention: a street without shops gets no awnings at all."""
+    if not spec.trade or spec.sign is None:
+        return
+    a, b = ring[spec.sign], ring[(spec.sign + 1) % len(ring)]
+    L = float(math.hypot(*(b - a)))
+    if L < AWNING_MIN_L:
+        return
+    d = (b - a) / L
+    out = np.array([d[1], -d[0]])                   # out of the ring (counter-clockwise)
+    mat = mat_idx[f"awning|{spec.trade}"]
+    t0, t1 = 0.3, L - 0.3
+    z1 = z_top - 0.15 - SIGN_H - AWNING_Z           # at the wall, under the board
+    z0 = z1 - AWNING_DROP_M                         # at its outer edge
+
+    def p(t, o, z):
+        q = a + d * t + out * o
+        return (float(q[0]), float(q[1]), float(z))
+    uv = ((0.002, 0.995), (0.012, 0.995), (0.012, 0.999), (0.002, 0.999))
+    m.quad(p(t0, 0.0, z1), p(t1, 0.0, z1), p(t1, AWNING_OUT_M, z0), p(t0, AWNING_OUT_M, z0), *uv, mat)
+    m.quad(p(t1, 0.0, z1), p(t0, 0.0, z1), p(t0, AWNING_OUT_M, z0), p(t1, AWNING_OUT_M, z0), *uv, mat)
+    for t, s_ in ((t0, -1.0), (t1, 1.0)):           # the two ends, each facing along the wall
+        c0, c1 = p(t, 0.0, z1), p(t, AWNING_OUT_M, z0)
+        c2, c3 = p(t, AWNING_OUT_M, z0 - 0.02), p(t, 0.0, z1 - 0.02)
+        if s_ > 0:
+            m.quad(c0, c1, c2, c3, *uv, mat)
+        else:
+            m.quad(c3, c2, c1, c0, *uv, mat)
+
+
 def _signs(m, spec, ring, z_top, mat_idx):
     """The sign band over a shop's street wall (spec.sign: its edge), shop by shop, a few without one."""
     edge = spec.sign
@@ -1269,7 +1332,7 @@ def _signs(m, spec, ring, z_top, mat_idx):
             t1 = L - 0.3
         if _hash01(spec.seed, "signon", k) < 0.85:
             c = a + d * ((t + t1) / 2) + out * (SIGN_OUT / 2)
-            look = f"sign|{int(_hash01(spec.seed, 'signc', k) * len(SIGN_TINTS))}"
+            look = f"shopboard|{spec.trade}" if spec.trade else                 f"sign|{int(_hash01(spec.seed, 'signc', k) * len(SIGN_TINTS))}"
             _box(m, c, d, (t1 - t) / 2 - 0.15, SIGN_OUT / 2, z_top - 0.15 - SIGN_H, z_top - 0.15, mat_idx[look])
         t, k = t1, k + 1
 
@@ -1847,12 +1910,15 @@ def build(specs_and_ground, lite=False):
             _stoop(m, spec, ring, gmin, gmax, mat_idx)
         if spec.porch and spec.door and not lite:
             _porch(m, spec, gmax, mat_idx)
-        if spec.sign is not None and spec.roof == "flat" and not lite:
+        # a flat-roofed block, or any building the places layer says holds a shop: a high street's shops are
+        # in pitched-roof terraces, and before this they were the one kind that never got a front
+        if spec.sign is not None and (spec.roof == "flat" or spec.trade) and not lite:
             if spec.windows is False:           # a big box: over its storefront band (_plain_wall_with_windows)
                 z_top = min(gmax + GROUND_FLOOR_SHOP_M + 1.15, z_eave)
             else:
                 z_top = z_eave - (spec.floors - 1) * spec.floor_h if spec.floors > 1 else z_eave
             _signs(m, spec, ring, z_top, mat_idx)
+            _awning(m, spec, ring, z_top, mat_idx)
     if m.n == 0:
         return None
     P, UV, T, M, C = m.arrays()
@@ -2672,7 +2738,7 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
                 continue
             at = {k: (a[k][i] if k in a else None) for k in
                   ("class", "height", "num_floors", "min_height", "roof_shape", "roof_height", "name",
-                   "facade_material", "roof_material", "ridge_direction")}
+                   "facade_material", "roof_material", "ridge_direction", "shop_kind")}
             hh_ = at.get("height")
             if hh_ is not None and np.isfinite(hh_) and 0 < hh_ < FLAT_FOOTPRINT_M and not parts_of.get(str(key)):
                 continue                # a mapped area, not a building (the Golden Gate toll plaza's 0.01 m footprint
@@ -3028,7 +3094,9 @@ def doors(items, lines, x0, y0, drives=None):
             if not spec.wall or spec.plain or spec.floors >= 7:
                 no_door = True
         # shops and big boxes: their sign faces the street, not the alley or the parking aisle behind
-        storefront = (spec.shop or spec.windows is False) and not spec.plain and spec.roof == "flat"
+        # a flat-roofed block, or any building the places layer names a shop: a high street's shops sit in
+        # pitched-roof terraces, and the flat-roof test alone gave them no storefront at all (shops.py)
+        storefront = (spec.shop or spec.windows is False) and not spec.plain             and (spec.roof == "flat" or spec.trade is not None)
         if no_door and not storefront:
             continue
         ring = drawn_ring(spec) + np.array([x0, y0])
