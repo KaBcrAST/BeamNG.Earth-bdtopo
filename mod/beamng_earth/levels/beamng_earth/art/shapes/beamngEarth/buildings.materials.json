@@ -443,5 +443,29 @@
       {}
     ],
     "translucent": false
+  },
+  "bne_bld_roof_clay": {
+    "name": "bne_bld_roof_clay",
+    "mapTo": "bne_bld_roof_clay",
+    "class": "Material",
+    "version": 1.5,
+    "Stages": [
+      {
+        "baseColorMap": "/levels/beamng_earth/art/shapes/beamngEarth/roof_tiles/roof_tiles_diff_1k.jpg",
+        "normalMap": "/levels/beamng_earth/art/shapes/beamngEarth/roof_tiles/roof_tiles_nor_gl_1k.jpg",
+        "roughnessMap": "/levels/beamng_earth/art/shapes/beamngEarth/roof_tiles/roof_tiles_rough_1k.jpg",
+        "baseColorFactor": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "vertColor": true
+      },
+      {},
+      {},
+      {}
+    ],
+    "translucent": false
   }
 }

@@ -38,7 +38,8 @@ MIN_AREA_M2 = 12.0          # footprints smaller than this are skipped (kiosks, 
 MAX_VERTS = 64              # footprints with more vertices are simplified until under this
 SIMPLIFY_M = 0.35           # m: vertices closer than this to the line of their neighbours are dropped
 TILE_PX_M = 12.0            # m of wall per 1024 px of the window sheets (5 sash bays of 2.4 m)
-ROOF_UV_M = 6.0             # m per repeat of the roof textures
+ROOF_UV_M = 6.0             # m per repeat of the roof textures ...
+ROOF_UV_BY_MAT = {}         # ... except where a texture states its own real size (filled below)
 SIDING_UV_M = 3.0           # m per repeat of the plain wall textures (sheds, garages)
 PITCH = {"gabled": 32.0, "hipped": 26.0}     # degrees
 EAVE_M = 0.35               # m a pitched roof overhangs its walls
@@ -60,6 +61,11 @@ SHOP = "bne_bld_shop"
 OFFICE = "bne_bld_office"
 ROOF_FLAT = "bne_bld_roof_flat"
 ROOF_SLATE = "bne_bld_roof_slate"
+# Clay pantiles. The stock roofing sheet is SLATE, 256 px square, and the clay roofs of half of Europe were
+# that slate tinted orange: the wrong relief (flat overlapping squares where a pantile is deeply ribbed) at
+# 43 px of roof per metre. Poly Haven's roof_tiles, CC0, 1 k, laid at the 2 m it covers: 512 px per metre,
+# twelve times finer, and the ribs are a pantile's. Measured 2026-11-01.
+ROOF_CLAY = "bne_bld_roof_clay"
 ROOF_SHINGLE = "bne_bld_roof_shingle"
 SIDING = "bne_bld_siding"
 FACADE = "bne_bld_facade"    # the plaster window sheet, tinted per building by vertex colour
@@ -86,7 +92,7 @@ BRICK_WALL = "bne_bld_brick"    # plain red brick (the stock brick_plain): a gar
 BRICKFACE = "bne_bld_brickface"
 BRICKFACE_UV_M = 2.01       # m per repeat: the real size Poly Haven gives for the texture
 CONCRETE = "bne_bridge_concrete"  # plain concrete (tunnel.materials.json): a precast garage's skin
-MATERIALS = (BRICKFACE, FACADE, SHOP, OFFICE, ROOF_FLAT, ROOF_SLATE, ROOF_SHINGLE, SIDING, STUCCO, ROOF_METAL, PANEL, METALWALL,
+MATERIALS = (ROOF_CLAY, BRICKFACE, FACADE, SHOP, OFFICE, ROOF_FLAT, ROOF_SLATE, ROOF_SHINGLE, SIDING, STUCCO, ROOF_METAL, PANEL, METALWALL,
              STONE, MARBLE, BRICK_WALL, CONCRETE)
 LOOKS = {
     "bne_bridge_steel": (METALWALL, (0.50, 0.52, 0.54)),
@@ -110,6 +116,12 @@ FACE_SUFFIX = "|face"
 for _t in BRICK_TINTS:
     LOOKS[_t + FACE_SUFFIX] = (BRICKFACE, LOOKS[_t][1])
 ROOF_TINTS = {               # per roof material: the colours a building's roof takes (hashed)
+    # Clay, on a texture that is already clay: near 1, where the old tints had to drag a grey slate
+    # (mean RGB 91, 92, 99) all the way to orange and left the roofs at a luma near 60. Over Bailleul the
+    # IGN orthophoto puts the sunlit slope of a clay roof at a luma near 153; that capture is hazy and
+    # washes colour out, so it is not followed to the letter, but it settles the direction: far too dark.
+    # These three land at 133, 107 and 143.
+    ROOF_CLAY: ((1.00, 0.88, 0.78), (0.82, 0.70, 0.64), (1.06, 0.98, 0.90)),
     ROOF_FLAT: ((0.85, 0.85, 0.85), (0.62, 0.62, 0.64), (0.95, 0.93, 0.88), (0.45, 0.45, 0.46), (0.75, 0.70, 0.64)),
     # 4..: clay tiles (terracotta, red-brown, faded orange) and dark grey / anthracite / brown-black (regional)
     ROOF_SLATE: ((1.0, 1.0, 1.0), (0.80, 0.66, 0.56), (0.76, 0.80, 0.90), (0.62, 0.62, 0.62),
@@ -388,11 +400,20 @@ class Style:
 
 
 _US_ROOFS = ((ROOF_SLATE, (0, 1, 2, 3)), (ROOF_SHINGLE, (0, 1, 2, 3)))
-_CLAY = (ROOF_SLATE, (4, 5, 6))
+_CLAY = (ROOF_CLAY, (0, 1, 2))
 _DARK = (ROOF_SLATE, (7, 8, 9))
 # A pitched roof whose skin the data names, in place of the region's guess (ROOF_TINTS: 4-6 are the clay
 # terracottas, 7-9 the slate and anthracite greys): Overture roof_material / OSM roof:material, and over France
 # the IGN's materiaux_de_la_toiture (bdtopo.py). Only the skins these palettes can actually show are listed.
+ROOF_UV_BY_MAT[ROOF_CLAY] = 2.0     # the size Poly Haven gives for roof_tiles
+
+
+def roof_uv_m(roof_mat):
+    """m per repeat for a roof look: its texture's own real size where it has one, else ROOF_UV_M."""
+    look = LOOKS.get(roof_mat)
+    return ROOF_UV_BY_MAT.get(look[0] if look else None, ROOF_UV_M)
+
+
 ROOF_MAPPED = {
     "roof_tiles": _CLAY, "tile": _CLAY, "tiles": _CLAY, "clay": _CLAY, "terracotta": _CLAY,
     "slate": (ROOF_SLATE, (7, 8)), "stone": (ROOF_SLATE, (7, 8)),
@@ -1409,9 +1430,10 @@ def _clutter(m, spec, ring, z_eave, mat_idx):
 
 def _roof(m, spec, ring, z_eave, mat_idx):
     rm = mat_idx[spec.roof_mat]
+    uv_m = roof_uv_m(spec.roof_mat)            # the texture's own size where it states one (clay: 2 m)
     if spec.roof == "flat":
         pts = [(p[0], p[1], z_eave) for p in ring]
-        uv = [(p[0] / ROOF_UV_M, p[1] / ROOF_UV_M) for p in ring]
+        uv = [(p[0] / uv_m, p[1] / uv_m) for p in ring]
         m.poly(pts, uv, rm)
         return
     c, u, hl, hw = oriented_box(ring)
@@ -1432,8 +1454,8 @@ def _roof(m, spec, ring, z_eave, mat_idx):
         return (float(p[0]), float(p[1]), float(z))
     slope = math.hypot(hw2, rise)
 
-    def uv(s, t):            # along the ridge, up the slope (m / ROOF_UV_M)
-        return (s / ROOF_UV_M, (hw2 - abs(t)) / hw2 * slope / ROOF_UV_M)
+    def uv(s, t):            # along the ridge, up the slope (m / uv_m)
+        return (s / uv_m, (hw2 - abs(t)) / hw2 * slope / uv_m)
     if spec.roof == "gabled":
         r = hl2
         m.quad(at(-hl2, -hw2, ze), at(hl2, -hw2, ze), at(r, 0, zr), at(-r, 0, zr),
@@ -1456,9 +1478,9 @@ def _roof(m, spec, ring, z_eave, mat_idx):
         m.quad(at(hl2, hw2, ze), at(-hl2, hw2, ze), at(-r, 0, zr), at(r, 0, zr),
                uv(hl2, hw2), uv(-hl2, hw2), uv(-r, 0), uv(r, 0), rm)
         m.tri(at(hl2, -hw2, ze), at(hl2, hw2, ze), at(r, 0, zr),
-              (-hw2 / ROOF_UV_M, 0), (hw2 / ROOF_UV_M, 0), (0, slope / ROOF_UV_M), rm)
+              (-hw2 / uv_m, 0), (hw2 / uv_m, 0), (0, slope / uv_m), rm)
         m.tri(at(-hl2, hw2, ze), at(-hl2, -hw2, ze), at(-r, 0, zr),
-              (-hw2 / ROOF_UV_M, 0), (hw2 / ROOF_UV_M, 0), (0, slope / ROOF_UV_M), rm)
+              (-hw2 / uv_m, 0), (hw2 / uv_m, 0), (0, slope / uv_m), rm)
 
 
 # The engine draws a shape's mesh with 16-bit indices: past 65,535 vertices they wrap and triangles join far-apart
@@ -2623,7 +2645,7 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
                 continue
             at = {k: (a[k][i] if k in a else None) for k in
                   ("class", "height", "num_floors", "min_height", "roof_shape", "roof_height", "name",
-                   "facade_material", "ridge_direction")}
+                   "facade_material", "roof_material", "ridge_direction")}
             hh_ = at.get("height")
             if hh_ is not None and np.isfinite(hh_) and 0 < hh_ < FLAT_FOOTPRINT_M and not parts_of.get(str(key)):
                 continue                # a mapped area, not a building (the Golden Gate toll plaza's 0.01 m footprint

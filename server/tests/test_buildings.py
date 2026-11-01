@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import io
+import re
 import unittest
 from pathlib import Path
 
@@ -85,7 +86,8 @@ class RegionStyleTest(unittest.TestCase):
         med = self.houses(40.42, -3.70)
         for h in med:
             if h.roof != "flat":
-                self.assertIn(int(h.roof_mat.split("|")[1]), (4, 5, 6), "clay tile roofs")
+                # the material, not an index into a palette: clay has its own texture now (ROOF_CLAY)
+                self.assertEqual(bld.LOOKS[h.roof_mat][0], bld.ROOF_CLAY, "clay tile roofs")
         self.assertTrue(any(h.roof == "flat" for h in med))
         lat = self.houses(19.43, -99.13)
         self.assertGreater(sum(h.roof == "flat" for h in lat), 0.5 * len(lat))
@@ -1250,4 +1252,45 @@ class PartyWallTest(unittest.TestCase):
         self.assertGreater(len(T), 0)
         self.assertLess(P[:, 0].min(), 0.01)
         self.assertGreater(P[:, 0].max(), 11.99, "and the pair still reaches both its outer faces")
+
+
+class AttrsReachPlanTest(unittest.TestCase):
+    """Every attribute plan() reads must actually get to it.
+
+    roof_material did not: plan() has read it since the mapped roof skins went in, tile_buildings never put
+    it in the dict it hands over, and the unit tests passed because they call plan() themselves. Over a
+    Bailleul cell that silently left 75 % of the pitched roofs picking their skin from the region's habits
+    instead of from the IGN's survey -- a Flemish town roofed in slate. Nothing but a test of the seam
+    between the two catches that, since neither side is wrong on its own.
+    """
+
+    # read by plan() but put in by the caller afterwards, each at a line of its own in tile_buildings
+    INJECTED = {"garage", "bridge_part", "bridge_masonry", "building_height"}
+    # read by plan() for a bridge's paint and never passed: older than the roof_material gap and left alone
+    # here rather than changed without measuring what it does to bridges
+    KNOWN_GAP = {"facade_color"}
+
+    def test_every_attribute_plan_reads_is_handed_to_it(self):
+        src = io.open(bld.__file__, encoding="utf-8").read()
+        body = src.split("def plan(")[1].split(chr(10) + "def ")[0]
+        read = set(re.findall(r'attrs(?:\.get\(|\[)["\']([a-z_]+)["\']', body))
+        self.assertIn("roof_material", read, "the attribute this test exists for")
+        handed = src.split("def tile_buildings(")[1]
+        passed = set(re.findall(r'["\']([a-z_]+)["\']', handed.split("at = {k:")[1].split("}")[0]))
+        missing = read - passed - self.INJECTED - self.KNOWN_GAP
+        self.assertEqual(missing, set(), "plan() reads these and never receives them: %s" % sorted(missing))
+
+    def test_a_mapped_roof_skin_survives_the_whole_way(self):
+        """End to end rather than by reading the source: a building the data calls tiled comes out clay."""
+        ring = rect(0, 0, 12, 8)
+        attrs = {"class": "house", "height": 9.0, "roof_shape": "gabled", "roof_material": "roof_tiles"}
+        spec = bld.plan(ring, attrs, lat=50.73, lon=2.735)
+        self.assertEqual(bld.LOOKS[spec.roof_mat][0], bld.ROOF_CLAY)
+        slate = dict(attrs, roof_material="slate")
+        self.assertEqual(bld.LOOKS[bld.plan(ring, slate, lat=50.73, lon=2.735).roof_mat][0], bld.ROOF_SLATE)
+
+    def test_clay_is_laid_at_its_own_size_and_slate_at_the_default(self):
+        self.assertEqual(bld.roof_uv_m(bld.ROOF_CLAY + "|0"), 2.0, "the size Poly Haven gives")
+        self.assertEqual(bld.roof_uv_m(bld.ROOF_SLATE + "|7"), bld.ROOF_UV_M)
+        self.assertEqual(bld.roof_uv_m("not a look"), bld.ROOF_UV_M)
 
