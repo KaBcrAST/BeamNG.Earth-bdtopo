@@ -198,6 +198,22 @@ AWNING_OUT_M = 1.1          # m the awning reaches over the pavement
 AWNING_DROP_M = 0.45        # m it falls over that reach
 AWNING_Z = 0.35             # m under the sign band's bottom
 AWNING_MIN_L = 2.5          # m of wall: a shorter front gets no awning
+# What is behind a shop's glass. The Italy atlas (WINDOW_EU) carries three painted interiors in its lower
+# half, which the mod never used: a chemist's shelves and counter, a clothes shop, a boutique. Measured off
+# the atlas on 2026-11-02, in Collada coordinates (v up). A shop's ground floor was a flat band of the stock
+# metal sheet until now -- the one surface a driver looks straight into.
+SHOP_INTERIORS = {
+    "chemist": (0.005, 0.495, 0.265, 0.505),
+    "clothes": (0.005, 0.495, 0.005, 0.255),
+    "boutique": (0.505, 0.995, 0.005, 0.255),
+}
+# which interior a trade shows (shops.KINDS): shelves for anything sold over a counter, rails for clothes
+TRADE_INTERIOR = {"pharmacy": "chemist", "food": "chemist", "bakery": "chemist", "hardware": "chemist",
+                  "fashion": "clothes", "beauty": "clothes",
+                  "restaurant": "boutique", "bar": "boutique", "bank": "boutique", "hotel": "boutique",
+                  "automotive": "boutique", "shop": "boutique"}
+SHOP_FRONT_M = (3.4, 6.0)   # m: one shop's width along the wall, hashed between these
+SHOP_GLASS_IN_M = 0.12      # m the glass stands back from the wall's face
 for _k, (_b, _a) in SHOP_COLOURS.items():       # the board and the awning as looks of their own
     LOOKS[f"shopboard|{_k}"] = (PANEL, _b)
     LOOKS[f"awning|{_k}"] = (PANEL, _a)
@@ -1044,6 +1060,12 @@ def _walls(m, spec, ring, z0, z_eave, mat_idx, lite=False, skip=()):
         for f in range(spec.floors):
             zb = z_eave if f == spec.floors - 1 else base + (f + 1) * spec.floor_h
             if f == 0 and spec.shop:
+                if spec.trade and not lite and L >= AWNING_MIN_L:
+                    # a glazed front with a painted interior behind it, shop by shop along the wall, the
+                    # same way the board band above it is divided (_signs)
+                    _shop_glass(m, spec, a, b, L, za, zb, mat_idx)
+                    za = zb
+                    continue
                 mat, (_, k_bpt) = mat_idx[SHOP], BAND_SHOP
                 band_k = BAND_SHOP[0]
                 nbs = max(1, int(round(L / (TILE_PX_M / k_bpt))))
@@ -1280,6 +1302,60 @@ def _box(m, c, u, hx, hy, z0, z1, mat):
         a, b = k[i], k[(i + 1) % 4]
         m.quad((a[0], a[1], z0), (b[0], b[1], z0), (b[0], b[1], z1), (a[0], a[1], z1), *uv, mat)
     m.quad(*[(p[0], p[1], z1) for p in k], *uv, mat)
+
+
+def _shop_glass(m, spec, a, b, L, za, zb, mat_idx):
+    """A shop's ground floor as glazed fronts with a painted interior behind the glass.
+
+    One front every SHOP_FRONT_M along the wall, each showing a horizontal slice of its trade's interior
+    (SHOP_INTERIORS) whose proportions match the front, so the picture is not stretched into it; the slice
+    moves along the interior from front to front, which is also what keeps two shops of a row apart. The
+    glass stands back SHOP_GLASS_IN_M, and the strip of wall between two fronts stays on the facade."""
+    u0, u1, v0, v1 = SHOP_INTERIORS[TRADE_INTERIOR.get(spec.trade, "boutique")]
+    mat = mat_idx[WINDOW_EU]
+    d = (b - a) / L
+    inward = np.array([-d[1], d[0]]) * SHOP_GLASS_IN_M      # into the building (counter-clockwise ring)
+    fac = mat_idx[spec.facade]
+    h = zb - za
+    t = 0.0
+    k = 0
+    while t < L - 0.05:
+        w = SHOP_FRONT_M[0] + (SHOP_FRONT_M[1] - SHOP_FRONT_M[0]) * _hash01(spec.seed, "front", k)
+        t1 = min(L, t + w)
+        if L - t1 < SHOP_FRONT_M[0] * 0.6:                  # no sliver of a shop at the end
+            t1 = L
+        pier = 0.18 if t1 < L else 0.0                      # the mullion between two fronts
+        ga, gb = t + 0.12, t1 - 0.12 - pier
+        if gb - ga >= 1.0:
+            # the slice of the interior with the front's own proportions, walked along it
+            want = (gb - ga) / max(h, 1e-6)                 # width over height, in metres
+            full = (u1 - u0) / (v1 - v0) * (1024.0 / 1024.0)
+            su = min(u1 - u0, (u1 - u0) * min(1.0, want / max(full, 1e-6)))
+            off = (u1 - u0 - su) * _hash01(spec.seed, "slice", k)
+            iu0, iu1 = u0 + off, u0 + off + su
+            pa = a + d * ga + inward
+            pb = a + d * gb + inward
+            m.quad((pa[0], pa[1], za), (pb[0], pb[1], za), (pb[0], pb[1], zb), (pa[0], pa[1], zb),
+                   (iu0, v0), (iu1, v0), (iu1, v1), (iu0, v1), mat)
+            # the reveal: the head and the two jambs, on the facade, so the glass is not a sticker
+            for q0, q1 in ((ga, gb),):
+                oa, ob = a + d * q0, a + d * q1
+                m.quad((oa[0], oa[1], zb), (ob[0], ob[1], zb), (pb[0], pb[1], zb), (pa[0], pa[1], zb),
+                       (0.002, 0.995), (0.012, 0.995), (0.012, 0.999), (0.002, 0.999), fac)
+            for q, inner in ((ga, pa), (gb, pb)):
+                oq = a + d * q
+                quad = ((oq[0], oq[1], za), (oq[0], oq[1], zb), (inner[0], inner[1], zb),
+                        (inner[0], inner[1], za))
+                m.quad(*(quad if q == ga else quad[::-1]),
+                       (0.002, 0.995), (0.012, 0.995), (0.012, 0.999), (0.002, 0.999), fac)
+        # the pier between this front and the next, and the strip under and over the glass, stay facade
+        for ta, tb in ((t, min(ga, L)), (max(gb, 0.0), t1)):
+            if tb - ta > 0.01:
+                qa, qb = a + d * ta, a + d * tb
+                m.quad((qa[0], qa[1], za), (qb[0], qb[1], za), (qb[0], qb[1], zb), (qa[0], qa[1], zb),
+                       (0.002, 0.995), (0.012, 0.995), (0.012, 0.999), (0.002, 0.999), fac)
+        t = t1
+        k += 1
 
 
 def _awning(m, spec, ring, z_top, mat_idx):

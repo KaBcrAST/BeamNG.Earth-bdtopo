@@ -201,3 +201,78 @@ class MeshTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GlassTest(unittest.TestCase):
+    """_shop_glass: the ground floor a driver looks straight into.
+
+    It was a flat band of the stock metal sheet. The Italy atlas carries three painted interiors in its
+    lower half -- a chemist's shelves, a clothes shop, a boutique -- which the mod never used.
+    """
+
+    A = np.array([0.0, 0.0])
+    B = np.array([14.0, 0.0])
+    L = 14.0
+    ZA, ZB = 0.0, 4.2
+
+    def glass(self, trade):
+        spec = bld.plan(np.array([(0.0, 0.0), (14.0, 0.0), (14.0, 10.0), (0.0, 10.0)]),
+                        {"class": "", "height": 9.0, "shop_kind": trade}, lat=50.73, lon=2.735)
+        m = bld.Mesh()
+        bld._shop_glass(m, spec, self.A, self.B, self.L, self.ZA, self.ZB, bld._Looks(spec.seed))
+        P = np.array(m.P, np.float64).reshape(-1, 3)
+        uv = np.array(m.UV, np.float64).reshape(-1, 2)
+        return spec, m, P, uv
+
+    def test_a_front_is_drawn_at_all(self):
+        _spec, m, P, _uv = self.glass("bakery")
+        self.assertGreater(len(m.T), 0)
+        self.assertAlmostEqual(P[:, 2].min(), self.ZA, places=9)
+        self.assertAlmostEqual(P[:, 2].max(), self.ZB, places=9)
+
+    def test_the_glass_stands_back_and_the_wall_does_not(self):
+        _spec, _m, P, _uv = self.glass("bakery")
+        back = P[:, 1]
+        self.assertAlmostEqual(back.max(), bld.SHOP_GLASS_IN_M, places=9, msg="the glass is set back")
+        self.assertAlmostEqual(back.min(), 0.0, places=9, msg="and the facade stays on its face")
+
+    def test_nothing_runs_past_the_wall(self):
+        _spec, _m, P, _uv = self.glass("bakery")
+        self.assertGreaterEqual(P[:, 0].min(), -1e-9)
+        self.assertLessEqual(P[:, 0].max(), self.L + 1e-9)
+
+    def test_the_trade_picks_its_interior(self):
+        for trade, want in (("pharmacy", "chemist"), ("food", "chemist"), ("fashion", "clothes"),
+                            ("beauty", "clothes"), ("bank", "boutique"), ("shop", "boutique")):
+            self.assertEqual(bld.TRADE_INTERIOR[trade], want, trade)
+            u0, u1, v0, v1 = bld.SHOP_INTERIORS[want]
+            _spec, _m, _P, uv = self.glass(trade)
+            on_it = ((uv[:, 1] >= v0 - 1e-9) & (uv[:, 1] <= v1 + 1e-9)
+                     & (uv[:, 0] >= u0 - 1e-9) & (uv[:, 0] <= u1 + 1e-9))
+            self.assertGreater(int(on_it.sum()), 0, "%s shows no %s" % (trade, want))
+
+    def test_the_interior_is_not_stretched_into_the_front(self):
+        """A slice of the picture with the front's own proportions, not the whole picture squeezed in."""
+        for trade in ("pharmacy", "fashion", "bank"):
+            u0, u1, v0, v1 = bld.SHOP_INTERIORS[bld.TRADE_INTERIOR[trade]]
+            _spec, _m, _P, uv = self.glass(trade)
+            rows = uv[(uv[:, 1] >= v0 - 1e-9) & (uv[:, 1] <= v1 + 1e-9)]
+            self.assertGreater(len(rows), 0, trade)
+            self.assertLessEqual(rows[:, 0].max() - rows[:, 0].min(), (u1 - u0) + 1e-9,
+                                 "%s samples outside its interior" % trade)
+
+    def test_every_trade_has_an_interior(self):
+        for k in shops.KINDS:
+            self.assertIn(k, bld.TRADE_INTERIOR, k)
+            self.assertIn(bld.TRADE_INTERIOR[k], bld.SHOP_INTERIORS, k)
+
+    def test_a_wall_too_short_for_a_front_draws_only_facade(self):
+        spec = bld.plan(np.array([(0.0, 0.0), (1.0, 0.0), (1.0, 2.0), (0.0, 2.0)]),
+                        {"class": "", "height": 6.0, "shop_kind": "bakery"}, lat=50.73, lon=2.735)
+        m = bld.Mesh()
+        bld._shop_glass(m, spec, self.A, np.array([1.0, 0.0]), 1.0, 0.0, 3.0, bld._Looks(spec.seed))
+        P = np.array(m.P, np.float64).reshape(-1, 3) if m.P else np.zeros((0, 3))
+        if len(P):
+            self.assertAlmostEqual(float(np.abs(P[:, 1]).max()), 0.0, places=9,
+                                   msg="no glass: a metre of wall is a door, not a window")
+
