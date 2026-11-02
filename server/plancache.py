@@ -26,6 +26,11 @@ import xproc
 WAIT_S = 90.0
 KEEP_S = 6 * 3600.0         # run folders untouched this long are removed (prune)
 RUN_ENV = "BNGE_PLAN_RUN"
+# A plan holds roads.Spec as it was derived, and the revisit cache keeps complete plans across runs (persist), keyed
+# on the map data's versions -- which do not move when the code that derives a Spec from unchanged map data does.
+# Raise this whenever such a change must reach a place the player has already driven.
+# 2: a divided road's invented one-way now takes evidence (roads.DUAL_MIN_RUN_M, 2026-11-02)
+PLAN_VERSION = 2
 
 
 def _pack(arrays, g, items):
@@ -66,7 +71,7 @@ def for_grader(cache_dir, grader, widths, wet):
     f = grader.frame
     md = getattr(grader, "md", None)
     pc = PlanCache(os.path.join(cache_dir, "plans", run), f.lat0, f.lon0,
-                   f"w{int(widths is not None)}s{int(wet is not None)}")
+                   f"p{PLAN_VERSION}w{int(widths is not None)}s{int(wet is not None)}")
     pc.persist = (cache_dir, (round(float(f.lat0), 7), round(float(f.lon0), 7), pc.signature,
                               md.versions() if md is not None and hasattr(md, "versions") else None))
     return pc
