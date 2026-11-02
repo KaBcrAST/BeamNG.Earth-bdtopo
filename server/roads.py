@@ -984,6 +984,13 @@ DUAL_CLASSES = {"motorway", "trunk", "primary", "secondary", "tertiary"}
 DUAL_GAP_M = (4.0, 45.0)    # centreline to centreline of a divided road's two carriageways
 DUAL_SHARE = 0.6            # this share of the shorter one runs beside the other ...
 DUAL_ANGLE_DEG = 25.0       # ... parallel within this
+# ... and they must run side by side this far before the pair is read as a divided road rather than a bend, a
+# junction stub or an arc of a roundabout. A share of a 2 m stub is meaningless: measured over 464 cells of
+# Flanders, every one of the 696 roads this function turned one-way on its own ran under 85 m (p50 33 m), and
+# OpenStreetMap called NONE of them one-way -- 68 said oneway=no outright and 182 carried lanes=2, a two-way
+# street (the user, 2026-11-02: "les routes sont souvent a sens unique la ou ca ne devrait pas"). The 2720
+# carriageways the map itself marks one-way keep their median whatever their length: they take the branch above.
+DUAL_MIN_RUN_M = 120.0
 
 
 def _dual_side(a, b):
@@ -995,11 +1002,28 @@ def _dual_side(a, b):
                               DUAL_GAP_M[0], DUAL_GAP_M[1], math.cos(math.radians(DUAL_ANGLE_DEG)))
 
 
+def _osm_two_way(feats, i):
+    """Does OpenStreetMap call feature i two-way outright (oneway=no)? Only then is it known: an absent tag says
+    nothing, and nearly every road carries none."""
+    col = feats.attrs.get("osm_oneway")
+    return col is not None and str(col[i]).strip().lower() == "no"
+
+
+def _poly_len(xy):
+    """Length (m) of a polyline already in metres."""
+    return float(np.hypot(*(np.diff(np.asarray(xy, np.float64), axis=0)).T).sum()) if len(xy) > 1 else 0.0
+
+
 def dual_carriageways(feats, specs, left_hand=False):
     """specs with the two carriageways of a divided road made one-way when the map says neither is (Boston St,
     Baltimore: two "primary" roads either side of a wide median, each with its own double yellow centre line, the
     user's report 2026-10-14). Two roads of one name and class running side by side DUAL_GAP_M apart over most of
-    the shorter one; each runs so that the other is on its left (driving on the right) or right. Pure."""
+    the shorter one; each runs so that the other is on its left (driving on the right) or right.
+
+    Inventing that one-way takes evidence, because the pair may just as well be a bend, a junction stub or two
+    arcs of a roundabout: they must run together for DUAL_MIN_RUN_M, and the map must not already call either of
+    them two-way (OpenStreetMap oneway=no). A carriageway the map itself marks one-way is not subject to either
+    test -- it only collects its median here. Pure."""
     groups = {}
     names = feats.attrs.get("name")
     if names is None:
@@ -1043,6 +1067,12 @@ def dual_carriageways(feats, specs, left_hand=False):
             gap = best[3]
             if sp.oneway:               # the map's own one-way carriageway: its direction stands
                 out[i] = sp._replace(median=gap, width=_dual_width(sp, sp.width, gap, feats, i))
+                continue
+            # neither of them may be a road the map calls two-way, and they must run together far enough to
+            # tell a divided road from a bend or a junction stub (DUAL_MIN_RUN_M)
+            if _osm_two_way(feats, i) or _osm_two_way(feats, best[2]):
+                continue
+            if best[0] * min(_poly_len(xy[i]), _poly_len(xy[best[2]])) < DUAL_MIN_RUN_M:
                 continue
             d = (1 if best[1] > 0 else -1) * (-1 if left_hand else 1)
             w = sp.width if _rule_value(feats.rules.get("width"), i) is not None else \

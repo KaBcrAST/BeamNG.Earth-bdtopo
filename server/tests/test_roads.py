@@ -216,6 +216,33 @@ class DualCarriagewayTest(unittest.TestCase):
                        ["Boston Street", "Elliott Street", "Boston Street"])
         self.assertFalse(any(s.oneway for s in roads.road_specs(f)))
 
+    def test_a_short_pair_is_not_a_divided_road(self):
+        """A bend, a junction stub or an arc of a roundabout: two same-named pieces side by side for a few tens of
+        metres. Over 464 cells of Flanders every one of the 696 one-ways this invented ran under 85 m, and
+        OpenStreetMap called none of them one-way (the user, 2026-11-02)."""
+        short = self.feats([[(0, 0), (40, 0)], [(40, 20), (0, 20)]], ["Rue du Pre Catelan"] * 2)
+        self.assertFalse(any(s.oneway for s in roads.road_specs(short)), "40 m tells nothing")
+        stub = self.feats([[(0, 0), (2, 0)], [(2, 20), (0, 20)]], ["Rond-Point du Moulin"] * 2)
+        self.assertFalse(any(s.oneway for s in roads.road_specs(stub)), "a 2 m stub is beside everything")
+        long_ = self.feats([[(0, 0), (300, 0)], [(300, 20), (0, 20)]], ["Boston Street"] * 2)
+        self.assertTrue(all(s.oneway for s in roads.road_specs(long_)), "300 m of it still reads as divided")
+
+    def test_the_map_calling_it_two_way_stands(self):
+        """oneway=no is the one thing the map says outright, and it beats the guess (68 of the 696)."""
+        f = self.feats([[(0, 0), (300, 0)], [(300, 20), (0, 20)]], ["Rue de Messines"] * 2)
+        f.attrs["osm_oneway"] = np.array(["no", ""])
+        sp = roads.road_specs(f)
+        self.assertFalse(any(s.oneway for s in sp), "neither carriageway: the pair is what was wrong")
+
+    def test_a_carriageway_the_map_marks_one_way_keeps_its_median_however_short(self):
+        """The 2720 real divided carriageways come from the map's own rule and are split short by Overture
+        (p10 16 m): neither the length nor the oneway=no test may touch them."""
+        f = self.feats([[(0, 0), (30, 0)], [(30, 20), (0, 20)]], ["Broadway"] * 2)
+        f.rules["oneway"] = mapgeom.rule_table([(0, 1.0, [0.0, 1.0]), (1, 1.0, [0.0, 1.0])], "float")
+        sp = roads.road_specs(f)
+        self.assertTrue(all(s.oneway for s in sp))
+        self.assertTrue(all(s.median and 19.0 < s.median < 21.0 for s in sp), "the median is still measured")
+
 
 class GeometryTest(unittest.TestCase):
     def test_clip(self):
